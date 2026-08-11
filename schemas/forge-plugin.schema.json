@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://forge.moretea-labs.dev/schemas/forge-plugin.schema.json",
+  "type": "object",
+  "required": ["id", "name", "version", "protocolVersion", "mode", "scope", "transport", "entrypoints", "capabilities", "actions"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "name": {"type": "string", "minLength": 1},
+    "version": {"type": "string"},
+    "protocolVersion": {"type": "string"},
+    "mode": {"const": "external"},
+    "scope": {"const": "controller"},
+    "provider": {"type": "string"},
+    "repositoryRegistrationRequired": {"type": "boolean"},
+    "transport": {
+      "type": "object",
+      "required": ["kind", "defaultSocket"],
+      "properties": {
+        "kind": {"const": "unix-socket-jsonl"},
+        "defaultSocket": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "entrypoints": {"type": "object"},
+    "state": {"type": "object"},
+    "capabilities": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "actions": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+  },
+  "additionalProperties": true
+}

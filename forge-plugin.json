@@ -1,0 +1,53 @@
+{
+  "$schema": "./schemas/forge-plugin.schema.json",
+  "id": "desktop_operator",
+  "name": "Forge Desktop Operator",
+  "version": "0.2.0",
+  "protocolVersion": "1.0",
+  "mode": "external",
+  "scope": "controller",
+  "provider": "local-macos",
+  "repositoryRegistrationRequired": false,
+  "transport": {
+    "kind": "unix-socket-jsonl",
+    "defaultSocket": "~/Library/Caches/Forge/desktop-operator.sock"
+  },
+  "entrypoints": {
+    "service": "desktop-operator serve",
+    "doctor": "desktop-operator doctor",
+    "manifest": "desktop-operator manifest",
+    "health": "desktop-operator health"
+  },
+  "state": {
+    "root": "~/Library/Application Support/Forge/DesktopOperator",
+    "owner": "plugin",
+    "controllerReleaseIndependent": true
+  },
+  "capabilities": [
+    "desktop.status",
+    "desktop.permissions",
+    "desktop.session",
+    "desktop.observe",
+    "desktop.interact",
+    "desktop.capture",
+    "desktop.clipboard",
+    "desktop.batch"
+  ],
+  "actions": [
+    "desktop_status",
+    "desktop_permissions_request",
+    "desktop_session_open",
+    "desktop_observe",
+    "desktop_press",
+    "desktop_type_text",
+    "desktop_key",
+    "desktop_clipboard_read",
+    "desktop_clipboard_write",
+    "desktop_copy",
+    "desktop_paste",
+    "desktop_open_url",
+    "desktop_screenshot",
+    "desktop_batch",
+    "desktop_session_close"
+  ]
+}
