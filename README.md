@@ -86,6 +86,6 @@ The public plugin identity is `desktop_operator`; the contract is declared in [`
 
 ## Project
 
-Current release: `v0.2.0`. Issues are for reproducible provider bugs and feature requests. Cross-product Forge questions belong in the [Forge Discussions](https://github.com/moretea-labs/forge/discussions). Security reports should use GitHub Private Vulnerability Reporting; see [SECURITY.md](SECURITY.md).
+Current release: `v0.2.1`. Issues are for reproducible provider bugs and feature requests. Cross-product Forge questions belong in the [Forge Discussions](https://github.com/moretea-labs/forge/discussions). Security reports should use GitHub Private Vulnerability Reporting; see [SECURITY.md](SECURITY.md).
 
 Licensed under the [MIT License](LICENSE).

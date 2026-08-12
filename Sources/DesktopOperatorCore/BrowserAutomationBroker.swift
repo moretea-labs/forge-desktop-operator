@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 public struct BrowserAutomationCommandResult: Equatable {
@@ -17,6 +18,7 @@ public final class BrowserAutomationBroker {
 
     private struct BrowserDefinition {
         let appName: String
+        let bundleIdentifier: String
     }
 
     private struct TabRef {
@@ -31,18 +33,24 @@ public final class BrowserAutomationBroker {
     private static let maxJavaScriptBytes = 768 * 1_024
     private static let maxCaptureBytes = 3 * 1_048_576
     private static let browsers: [String: BrowserDefinition] = [
-        "chrome": BrowserDefinition(appName: "Google Chrome"),
-        "vivaldi": BrowserDefinition(appName: "Vivaldi"),
+        "chrome": BrowserDefinition(appName: "Google Chrome", bundleIdentifier: "com.google.Chrome"),
+        "vivaldi": BrowserDefinition(appName: "Vivaldi", bundleIdentifier: "com.vivaldi.Vivaldi"),
     ]
 
     private let runner: CommandRunner
+    private let frontmostBundleIdentifier: () -> String?
 
     public init() {
         self.runner = Self.runCommand
+        self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
     }
 
-    public init(runner: @escaping CommandRunner) {
+    public init(
+        runner: @escaping CommandRunner,
+        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+    ) {
         self.runner = runner
+        self.frontmostBundleIdentifier = frontmostBundleIdentifier
     }
 
     public func execute(params: JSONValue) throws -> JSONValue {
@@ -64,7 +72,10 @@ public final class BrowserAutomationBroker {
 
         switch action {
         case "metadata":
-            return try valueResult(runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
+            return valueResult(authoritativeMetadata(
+                try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
+                browser: browser
+            ))
         case "create_tab":
             let url = try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes)
             return try valueResult(runAppleScript(createTabScript(browser.appName), args: [url], timeoutMs: timeoutMs))
@@ -73,7 +84,15 @@ public final class BrowserAutomationBroker {
             return try valueResult(runAppleScript(closeTabScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
         case "navigate":
             let url = try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes)
-            return try valueResult(runAppleScript(navigateScript(browser.appName, target), args: [url], timeoutMs: timeoutMs))
+            if target != nil {
+                throw PluginError(
+                    code: "BROWSER_AUTOMATION_BACKGROUND_NAVIGATION_REQUIRES_REPLACEMENT",
+                    message: "Chrome/Vivaldi background tabs cannot be navigated reliably in place through Apple Events; create a replacement tab instead.",
+                    retryable: true,
+                    domain: "browser"
+                )
+            }
+            return try valueResult(runAppleScript(navigateScript(browser.appName, nil), args: [url], timeoutMs: timeoutMs))
         case "reload":
             return try valueResult(runAppleScript(reloadScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
         case "execute_javascript":
@@ -89,6 +108,7 @@ public final class BrowserAutomationBroker {
     private func boundedTimeout(_ value: Int?) -> Int {
         min(max(value ?? Self.defaultTimeoutMs, 100), Self.maxTimeoutMs)
     }
+
 
     private func optionalRef(_ value: JSONValue?) throws -> TabRef? {
         guard let value else { return nil }
@@ -111,6 +131,14 @@ public final class BrowserAutomationBroker {
 
     private func valueResult(_ value: String) -> JSONValue {
         .object(["value": .string(value)])
+    }
+
+    private func authoritativeMetadata(_ value: String, browser: BrowserDefinition) -> String {
+        let separator = String(UnicodeScalar(30)!)
+        var parts = value.components(separatedBy: separator)
+        guard !parts.isEmpty else { return value }
+        parts[0] = frontmostBundleIdentifier() == browser.bundleIdentifier ? "true" : "false"
+        return parts.joined(separator: separator)
     }
 
     private func runAppleScript(_ script: String, args: [String], timeoutMs: Int) throws -> String {
@@ -163,7 +191,7 @@ public final class BrowserAutomationBroker {
             set windowBounds to bounds of targetWindow
             set separator to ASCII character 30
             set targetIsActive to ((id of active tab of targetWindow) is (id of targetTab))
-            return (frontmost as text) & separator & (URL of targetTab as text) & separator & (title of targetTab as text) & separator & ((item 1 of windowBounds) as text) & separator & ((item 2 of windowBounds) as text) & separator & ((item 3 of windowBounds) as text) & separator & ((item 4 of windowBounds) as text) & separator & "" & separator & "" & separator & (targetIsActive as text)
+            return (frontmost as text) & separator & (URL of targetTab as text) & separator & "" & separator & ((item 1 of windowBounds) as text) & separator & ((item 2 of windowBounds) as text) & separator & ((item 3 of windowBounds) as text) & separator & ((item 4 of windowBounds) as text) & separator & "" & separator & "" & separator & (targetIsActive as text) & separator & (loading of targetTab as text)
             """)
         }
         return tell(appName, """

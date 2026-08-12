@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import DesktopOperatorCore
@@ -46,11 +47,11 @@ import Testing
 @Test func browserAutomationBrokerRunsChromeMetadataThroughStableProcess() throws {
     var executable = ""
     var arguments: [String] = []
-    let broker = BrowserAutomationBroker { command, args, _ in
+    let broker = BrowserAutomationBroker(runner: { command, args, _ in
         executable = command
         arguments = args
         return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}Example\u{1e}0\u{1e}0\u{1e}800\u{1e}600")
-    }
+    }, frontmostBundleIdentifier: { "com.google.Chrome" })
     let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
         id: "metadata",
         method: "macos_browser_automation",
@@ -65,7 +66,7 @@ import Testing
     #expect(executable == "/usr/bin/osascript")
     #expect(arguments.first == "-e")
     #expect(arguments.joined(separator: " ").contains("Google Chrome"))
-    #expect(response.result?["value"]?.stringValue?.contains("https://example.com") == true)
+    #expect(response.result?["value"]?.stringValue?.hasPrefix("true\u{1e}https://example.com") == true)
 }
 
 @Test func browserAutomationBrokerIsInternalNotPublicPluginAction() throws {
@@ -77,4 +78,118 @@ import Testing
     } catch let error as PluginError {
         #expect(error.code == "UNSUPPORTED")
     }
+}
+
+@Test func browserAutomationBrokerTargetMetadataAvoidsBackgroundTitleCoercion() throws {
+    var script = ""
+    let broker = BrowserAutomationBroker { _, args, _ in
+        script = args.joined(separator: "\n")
+        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}\u{1e}0\u{1e}0\u{1e}800\u{1e}600\u{1e}\u{1e}\u{1e}false\u{1e}false")
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "target-metadata",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("metadata"),
+            "product": .string("chrome"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")])
+        ])
+    ))
+    #expect(response.ok)
+    #expect(script.contains("URL of targetTab as text"))
+    #expect(!script.contains("title of targetTab as text"))
+}
+
+
+@Test func browserAutomationBrokerRejectsTargetedBackgroundNavigate() throws {
+    let broker = BrowserAutomationBroker { _, _, _ in
+        BrowserAutomationCommandResult(status: 0, stdout: "")
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "targeted-navigate",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("navigate"),
+            "product": .string("chrome"),
+            "url": .string("https://example.com/next"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")])
+        ])
+    ))
+    #expect(!response.ok)
+    #expect(response.error?.code == "BROWSER_AUTOMATION_BACKGROUND_NAVIGATION_REQUIRES_REPLACEMENT")
+}
+
+@Test func browserAutomationBrokerCreatesBackgroundTabWithoutActivatingIt() throws {
+    var script = ""
+    let broker = BrowserAutomationBroker { _, args, _ in
+        script = args.joined(separator: "\n")
+        return BrowserAutomationCommandResult(status: 0, stdout: "10\u{1e}20")
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "background-tab",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("create_tab"),
+            "product": .string("chrome"),
+            "url": .string("https://example.com")
+        ])
+    ))
+    #expect(response.ok)
+    #expect(script.contains("set originalActiveIndex to active tab index of targetWindow"))
+    #expect(script.contains("set active tab index of targetWindow to originalActiveIndex"))
+    #expect(!script.contains("activate"))
+}
+
+@Test func liveBrowserAutomationStaysInBackgroundWhenExplicitlyEnabled() throws {
+    guard ProcessInfo.processInfo.environment["FORGE_DESKTOP_LIVE_BROWSER_E2E"] == "1" else { return }
+    let broker = BrowserAutomationBroker()
+    let separator = Character(String(UnicodeScalar(30)!))
+    func value(_ action: String, extra: [String: JSONValue] = [:]) throws -> String {
+        var params: [String: JSONValue] = [
+            "protocolVersion": .number(1), "action": .string(action), "product": .string("chrome"), "timeoutMs": .number(5_000)
+        ]
+        extra.forEach { params[$0.key] = $0.value }
+        let started = Date()
+        do { return try broker.execute(params: .object(params))["value"]?.stringValue ?? "" }
+        catch { throw NSError(domain: "forge.desktop.live-browser-e2e", code: 1, userInfo: [NSLocalizedDescriptionKey: "action \(action) failed after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error)"]) }
+    }
+    func create(_ url: String) throws -> JSONValue {
+        let parts = try value("create_tab", extra: ["url": .string(url)]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+        #expect(parts.count == 2)
+        return .object(["windowId": .string(parts[0]), "tabId": .string(parts[1])])
+    }
+    let before = try value("metadata").split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+    let originalURL = before[1]
+    let originalFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let oldRef = try create("about:blank")
+    var currentRef = oldRef
+    defer { _ = try? value("close_tab", extra: ["ref": currentRef]); _ = try? value("close_tab", extra: ["ref": oldRef]) }
+    let target = try value("metadata", extra: ["ref": oldRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+    #expect(target.count >= 10)
+    #expect(target[9] == "false")
+    #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
+    #expect(try value("execute_javascript", extra: ["ref": oldRef, "source": .string("document.location.href")]).contains("about:blank"))
+
+    let replacementURL = "data:text/html,%3Ctitle%3EForge%20E2E%3C%2Ftitle%3E%3Cbody%3Eok%3C%2Fbody%3E"
+    let replacementRef = try create(replacementURL)
+    currentRef = replacementRef
+    Thread.sleep(forTimeInterval: 0.7)
+    let replacementMetadata = try value("metadata", extra: ["ref": replacementRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+    #expect(replacementMetadata[9] == "false")
+    #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
+    #expect(try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.location.href")]).hasPrefix("data:text/html"))
+    #expect(try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.title")]) == "Forge E2E")
+    _ = try value("close_tab", extra: ["ref": oldRef])
+
+    _ = try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.title = 'forge-live-e2e-marker'; document.title")])
+    _ = try value("reload", extra: ["ref": replacementRef])
+    Thread.sleep(forTimeInterval: 0.3)
+    #expect(try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.title")]) == "Forge E2E")
+    _ = try value("close_tab", extra: ["ref": replacementRef])
+    let after = try value("metadata").split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+    #expect(after[1] == originalURL)
+    #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
 }

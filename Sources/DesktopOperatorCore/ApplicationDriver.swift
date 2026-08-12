@@ -56,7 +56,7 @@ public enum ApplicationDriver {
     }
 
     public static func isActive(pid: Int32) -> Bool {
-        NSRunningApplication(processIdentifier: pid)?.isActive == true
+        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
     }
 
     private static func waitUntilActive(pid: Int32, timeout: TimeInterval) -> Bool {

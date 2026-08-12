@@ -38,6 +38,8 @@ Desktop Operator deliberately differs where the domain requires it:
 - state belongs to the plugin's Application Support directory;
 - the transport is a Unix socket instead of a repository CLI/API;
 - sessions reference GUI processes and AX elements, not Git repositories.
+- the internal browser broker exposes only bounded Chrome/Vivaldi Apple Events primitives; Forge composes policy-aware browser sessions above those primitives;
+- browser primitives are background-first and keep the user's active tab unchanged; foreground activation is reserved for operations that intrinsically require visible desktop input or capture.
 
 ## Trust and execution
 
