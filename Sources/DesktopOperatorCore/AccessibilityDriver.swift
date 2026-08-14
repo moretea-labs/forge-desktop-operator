@@ -85,56 +85,35 @@ public final class AccessibilityDriver {
         coordinateFallback: Bool,
         forceCoordinate: Bool = false
     ) throws -> JSONValue {
-        let element = try resolveElement(session: session, selector: selector)
-        prepare(element)
         if forceCoordinate {
-            guard ApplicationDriver.isActive(pid: session.record.pid) else {
-                throw PluginError(code: "COORDINATE_PRESS_REQUIRES_ACTIVE_APPLICATION", message: "Selector-bound physical press requires the target application to already be frontmost; activate it and observe a fresh snapshot before retrying", retryable: true, domain: "accessibility")
-            }
-            guard let frame = frame(of: element) else {
-                throw PluginError(code: "COORDINATE_PRESS_FRAME_UNAVAILABLE", message: "Selected Accessibility element has no clickable frame", retryable: true, domain: "accessibility")
-            }
-            let point = try Self.coordinateClickPoint(frame: frame, displayBounds: Self.activeDisplayBounds())
-            try InputDriver.click(x: point.x, y: point.y)
-            return .object([
-                "method": .string("coordinate_forced"),
-                "point": .object(["x": .number(point.x), "y": .number(point.y)]),
-                "snapshot_revision": .number(Double(session.record.snapshotRevision))
-            ])
-        }
-        let applicationWasActive = ApplicationDriver.isActive(pid: session.record.pid)
-        if !applicationWasActive, !ApplicationDriver.activate(pid: session.record.pid) {
             throw PluginError(
-                code: "APP_ACTIVATION_FAILED",
-                message: "Target application did not become frontmost before desktop press",
-                retryable: true,
-                domain: "application"
+                code: "BACKGROUND_SAFE_COORDINATE_INPUT_DISABLED",
+                message: "Forge Desktop Operator silent mode does not synthesize pointer clicks or move the user's mouse. Use a semantic Accessibility action instead.",
+                retryable: false,
+                domain: "accessibility"
             )
         }
+        let element = try resolveElement(session: session, selector: selector)
+        prepare(element)
         var result = AXUIElementPerformAction(element, kAXPressAction as CFString)
         if result == .cannotComplete {
             Thread.sleep(forTimeInterval: 0.15)
             result = AXUIElementPerformAction(element, kAXPressAction as CFString)
         }
         if result == .success {
-            return .object(["method": .string("AXPress"), "snapshot_revision": .number(Double(session.record.snapshotRevision))])
+            return .object([
+                "method": .string("AXPress_background"),
+                "snapshot_revision": .number(Double(session.record.snapshotRevision))
+            ])
         }
-        if coordinateFallback {
-            let fallbackSelector = try Self.coordinateFallbackSelector(selector, applicationWasActive: applicationWasActive)
-            let fallbackElement = fallbackSelector == selector
-                ? element
-                : try resolveElement(session: session, selector: fallbackSelector)
-            prepare(fallbackElement)
-            if let frame = frame(of: fallbackElement) {
-                try InputDriver.click(x: frame.x + frame.width / 2, y: frame.y + frame.height / 2)
-                return .object([
-                    "method": .string("coordinate"),
-                    "ax_error": .number(Double(result.rawValue)),
-                    "point": .object(["x": .number(frame.x + frame.width / 2), "y": .number(frame.y + frame.height / 2)])
-                ])
-            }
-        }
-        throw PluginError(code: "AX_PRESS_FAILED", message: "AXPress failed with code \(result.rawValue)", retryable: result == .cannotComplete, domain: "accessibility")
+        throw PluginError(
+            code: coordinateFallback ? "BACKGROUND_SAFE_COORDINATE_FALLBACK_DISABLED" : "AX_PRESS_FAILED",
+            message: coordinateFallback
+                ? "AXPress failed and silent mode refuses coordinate fallback because it can steal the pointer or foreground."
+                : "AXPress failed with code \(result.rawValue)",
+            retryable: result == .cannotComplete,
+            domain: "accessibility"
+        )
     }
 
     static func coordinateFallbackSelector(_ selector: ElementSelector, applicationWasActive: Bool) throws -> ElementSelector {
@@ -179,16 +158,35 @@ public final class AccessibilityDriver {
     public func typeText(session: DesktopSessionState, selector: ElementSelector, text: String, replaceExisting: Bool) throws -> JSONValue {
         let element = try resolveElement(session: session, selector: selector)
         prepare(element)
-        ApplicationDriver.activate(pid: session.record.pid)
-        _ = AXUIElementSetAttributeValue(element, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+        let nextValue: String
         if replaceExisting {
-            let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, text as CFString)
-            if result == .success {
-                return .object(["method": .string("AXValue"), "characters": .number(Double(text.count))])
+            nextValue = text
+        } else {
+            var currentValue: CFTypeRef?
+            let readResult = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &currentValue)
+            guard readResult == .success else {
+                throw PluginError(
+                    code: "BACKGROUND_SAFE_TEXT_INPUT_UNAVAILABLE",
+                    message: "Silent text append requires a readable Accessibility value; synthetic keyboard input is disabled.",
+                    retryable: readResult == .cannotComplete,
+                    domain: "accessibility"
+                )
             }
+            nextValue = (currentValue as? String ?? "") + text
         }
-        try InputDriver.typeUnicode(text, replaceExisting: replaceExisting)
-        return .object(["method": .string("CGEventUnicode"), "characters": .number(Double(text.count))])
+        let result = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, nextValue as CFString)
+        guard result == .success else {
+            throw PluginError(
+                code: "BACKGROUND_SAFE_TEXT_INPUT_UNAVAILABLE",
+                message: "The selected element does not accept background AXValue updates; synthetic keyboard input and foreground activation are disabled.",
+                retryable: result == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+        return .object([
+            "method": .string("AXValue_background"),
+            "characters": .number(Double(text.count))
+        ])
     }
 
     public func resolveElement(session: DesktopSessionState, selector: ElementSelector) throws -> AXUIElement {

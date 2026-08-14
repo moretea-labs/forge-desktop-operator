@@ -95,19 +95,24 @@ public final class PluginRuntime {
             let bundleId = object["bundle_id"]?.stringValue
             let appName = object["app_name"]?.stringValue
             let launch = object["launch"]?.boolValue ?? true
-            let activate = object["activate"]?.boolValue ?? true
+            let activate = object["activate"]?.boolValue ?? false
+            if activate {
+                throw PluginError(
+                    code: "FOREGROUND_ACTIVATION_DISABLED",
+                    message: "Desktop sessions are silent by default and do not activate applications. Use an explicit human-handoff flow if foreground control is required.",
+                    retryable: false,
+                    domain: "application"
+                )
+            }
             let openSession: () throws -> JSONValue = {
                 let application = try ApplicationDriver.ensureRunning(
                     bundleIdentifier: bundleId,
                     appName: appName,
                     launch: launch
                 )
-                if activate, !ApplicationDriver.activate(pid: application.processIdentifier) {
-                    throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application did not become frontmost", retryable: true, domain: "application")
-                }
                 return try JSONValue.encode(self.sessions.create(application: application).record)
             }
-            return try (launch || activate) ? withUILock(openSession) : openSession()
+            return try launch ? withUILock(openSession) : openSession()
         case "desktop_observe":
             let session = try session(from: object)
             let rootSelector = object["root_selector"] == nil ? nil : try parseSelector(object["root_selector"])
@@ -137,7 +142,7 @@ public final class PluginRuntime {
             let selector = try parseSelector(object["selector"])
             return try withUILock {
                 try session.withLock {
-                    try accessibility.press(session: session, selector: selector, coordinateFallback: object["coordinate_fallback"]?.boolValue ?? true, forceCoordinate: object["force_coordinate"]?.boolValue ?? false)
+                    try accessibility.press(session: session, selector: selector, coordinateFallback: object["coordinate_fallback"]?.boolValue ?? false, forceCoordinate: object["force_coordinate"]?.boolValue ?? false)
                 }
             }
         case "desktop_type_text":
@@ -155,19 +160,18 @@ public final class PluginRuntime {
                 guard let key = value.stringValue else { throw PluginError.invalidArguments("keys must contain strings") }
                 return key
             }
+            guard let interactionId = object["interaction_id"]?.stringValue else {
+                throw PluginError(code: "DESKTOP_KEY_REQUIRES_INTERACTION_ID", message: "Silent key input requires an explicit desktop session and never targets the user's current foreground app implicitly.", retryable: false, domain: "input")
+            }
+            let session = try sessions.get(interactionId)
             return try withUILock {
-                if let interactionId = object["interaction_id"]?.stringValue {
-                    let session = try sessions.get(interactionId)
-                    return try session.withLock {
-                        guard ApplicationDriver.activate(pid: session.record.pid) else {
-                            throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application did not become frontmost", retryable: true, domain: "application")
-                        }
-                        try InputDriver.press(keys: keys)
-                        return .object(["pressed": .array(keys.map(JSONValue.string))])
+                try session.withLock {
+                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                        throw PluginError(code: "BACKGROUND_SAFE_KEY_INPUT_UNAVAILABLE", message: "Synthetic key events require the target application to already be foreground; Forge Desktop Operator will not activate it automatically.", retryable: true, domain: "input")
                     }
+                    try InputDriver.press(keys: keys)
+                    return .object(["pressed": .array(keys.map(JSONValue.string))])
                 }
-                try InputDriver.press(keys: keys)
-                return .object(["pressed": .array(keys.map(JSONValue.string))])
             }
         case "desktop_clipboard_read":
             return .object([
@@ -185,8 +189,8 @@ public final class PluginRuntime {
             let session = try sessions.get(interactionId)
             return try withUILock {
                 try session.withLock {
-                    guard ApplicationDriver.activate(pid: session.record.pid) else {
-                        throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application did not become frontmost", retryable: true, domain: "application")
+                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                        throw PluginError(code: "BACKGROUND_SAFE_COPY_UNAVAILABLE", message: "Copy requires the target application to already be foreground; silent mode will not activate it.", retryable: true, domain: "input")
                     }
                     try InputDriver.press(keys: ["command", "c"])
                     return .object(["copied": .bool(true)])
@@ -197,8 +201,8 @@ public final class PluginRuntime {
             let session = try sessions.get(interactionId)
             return try withUILock {
                 try session.withLock {
-                    guard ApplicationDriver.activate(pid: session.record.pid) else {
-                        throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application did not become frontmost", retryable: true, domain: "application")
+                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                        throw PluginError(code: "BACKGROUND_SAFE_PASTE_UNAVAILABLE", message: "Paste requires the target application to already be foreground; silent mode will not activate it.", retryable: true, domain: "input")
                     }
                     try InputDriver.press(keys: ["command", "v"])
                     return .object(["pasted": .bool(true)])

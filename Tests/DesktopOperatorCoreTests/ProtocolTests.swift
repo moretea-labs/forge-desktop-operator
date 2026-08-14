@@ -81,3 +81,7 @@ import Testing
         )
     }
 }
+@Test func applicationDriverRejectsDeadPids() {
+    #expect(ApplicationDriver.processIsAlive(ProcessInfo.processInfo.processIdentifier))
+    #expect(!ApplicationDriver.processIsAlive(Int32.max))
+}

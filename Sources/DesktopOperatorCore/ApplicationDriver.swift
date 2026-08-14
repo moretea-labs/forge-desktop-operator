@@ -1,15 +1,40 @@
 import AppKit
-import ApplicationServices
 import CoreGraphics
+import Darwin
 import Foundation
 
 public enum ApplicationDriver {
     public static func findRunning(bundleIdentifier: String?, appName: String?) -> NSRunningApplication? {
-        NSWorkspace.shared.runningApplications.first { app in
+        if let bundleIdentifier {
+            let bundleMatches = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
+            if let running = preferredRunningApplication(bundleMatches) {
+                return running
+            }
+        }
+
+        let workspaceMatches = NSWorkspace.shared.runningApplications.filter { app in
+            guard !app.isTerminated, processIsAlive(app.processIdentifier) else { return false }
             if let bundleIdentifier, app.bundleIdentifier == bundleIdentifier { return true }
             if let appName, app.localizedName?.caseInsensitiveCompare(appName) == .orderedSame { return true }
             return false
         }
+        return preferredRunningApplication(workspaceMatches)
+    }
+
+    private static func preferredRunningApplication(_ applications: [NSRunningApplication]) -> NSRunningApplication? {
+        applications
+            .filter { !$0.isTerminated && processIsAlive($0.processIdentifier) }
+            .sorted { lhs, rhs in
+                if lhs.isActive != rhs.isActive { return lhs.isActive }
+                if lhs.isHidden != rhs.isHidden { return !lhs.isHidden }
+                return lhs.processIdentifier > rhs.processIdentifier
+            }
+            .first
+    }
+
+    static func processIsAlive(_ pid: Int32) -> Bool {
+        if Darwin.kill(pid, 0) == 0 { return true }
+        return errno == EPERM
     }
 
     public static func ensureRunning(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> NSRunningApplication {
@@ -26,9 +51,9 @@ public enum ApplicationDriver {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         if let bundleIdentifier {
-            process.arguments = ["-b", bundleIdentifier]
+            process.arguments = ["-g", "-b", bundleIdentifier]
         } else {
-            process.arguments = ["-a", appName!]
+            process.arguments = ["-g", "-a", appName!]
         }
         let errorPipe = Pipe()
         process.standardError = errorPipe
@@ -59,71 +84,25 @@ public enum ApplicationDriver {
         NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
     }
 
-    private static func waitUntilActive(pid: Int32, timeout: TimeInterval) -> Bool {
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            if isActive(pid: pid) { return true }
-            Thread.sleep(forTimeInterval: 0.02)
-        } while Date() < deadline
-        return isActive(pid: pid)
-    }
-
-    private static func activateThroughAccessibility(pid: Int32) {
-        let applicationElement = AXUIElementCreateApplication(pid)
-        _ = AXUIElementSetMessagingTimeout(applicationElement, 0.35)
-        var settable = DarwinBoolean(false)
-        if AXUIElementIsAttributeSettable(applicationElement, kAXFrontmostAttribute as CFString, &settable) == .success, settable.boolValue {
-            _ = AXUIElementSetAttributeValue(applicationElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
-        }
-
-        var focusedWindow: CFTypeRef?
-        if AXUIElementCopyAttributeValue(applicationElement, kAXFocusedWindowAttribute as CFString, &focusedWindow) == .success,
-           let window = focusedWindow {
-            let axWindow = unsafeDowncast(window, to: AXUIElement.self)
-            _ = AXUIElementSetMessagingTimeout(axWindow, 0.35)
-            _ = AXUIElementPerformAction(axWindow, kAXRaiseAction as CFString)
-            return
-        }
-
-        var windowsValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(applicationElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
-           let windows = windowsValue as? [AXUIElement],
-           let window = windows.first {
-            _ = AXUIElementSetMessagingTimeout(window, 0.35)
-            _ = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
-        }
-    }
-
-    private static func activateThroughWindowClick(pid: Int32) -> Bool {
-        guard let frame = windows(pid: pid).first(where: { $0.onScreen && $0.layer == 0 })?.frame,
-              frame.width >= 80, frame.height >= 40 else { return false }
-        let x = frame.x + frame.width / 2
-        let y = frame.y + min(14, frame.height / 4)
-        do {
-            try InputDriver.click(x: x, y: y)
-            return waitUntilActive(pid: pid, timeout: 0.45)
-        } catch {
-            return false
-        }
-    }
-
-    @discardableResult
-    public static func activate(pid: Int32) -> Bool {
-        if isActive(pid: pid) { return true }
-        activateThroughAccessibility(pid: pid)
-        if waitUntilActive(pid: pid, timeout: 0.25) { return true }
-        if activateThroughWindowClick(pid: pid) { return true }
-        guard let application = NSRunningApplication(processIdentifier: pid),
-              application.activate(options: [.activateIgnoringOtherApps]) else { return false }
-        return waitUntilActive(pid: pid, timeout: 0.65)
-    }
-
     public static func openURL(_ value: String) throws {
         guard let url = URL(string: value), url.scheme != nil else {
             throw PluginError.invalidArguments("desktop_open_url requires an absolute URL with a scheme")
         }
-        guard NSWorkspace.shared.open(url) else {
-            throw PluginError(code: "OPEN_URL_FAILED", message: "NSWorkspace could not open \(value)", retryable: true, domain: "application")
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        process.arguments = ["-g", url.absoluteString]
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw PluginError(code: "OPEN_URL_FAILED", message: error.localizedDescription, retryable: true, domain: "application")
+        }
+        guard process.terminationStatus == 0 else {
+            let data = errorPipe.fileHandleForReading.readDataToEndOfFile()
+            let message = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+            throw PluginError(code: "OPEN_URL_FAILED", message: message ?? "open exited with status \(process.terminationStatus)", retryable: true, domain: "application")
         }
     }
 
