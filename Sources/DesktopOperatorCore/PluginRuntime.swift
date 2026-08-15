@@ -96,20 +96,15 @@ public final class PluginRuntime {
             let appName = object["app_name"]?.stringValue
             let launch = object["launch"]?.boolValue ?? true
             let activate = object["activate"]?.boolValue ?? false
-            if activate {
-                throw PluginError(
-                    code: "FOREGROUND_ACTIVATION_DISABLED",
-                    message: "Desktop sessions are silent by default and do not activate applications. Use an explicit human-handoff flow if foreground control is required.",
-                    retryable: false,
-                    domain: "application"
-                )
-            }
             let openSession: () throws -> JSONValue = {
                 let application = try ApplicationDriver.ensureRunning(
                     bundleIdentifier: bundleId,
                     appName: appName,
                     launch: launch
                 )
+                if activate {
+                    try ApplicationDriver.activate(application)
+                }
                 return try JSONValue.encode(self.sessions.create(application: application).record)
             }
             return try launch ? withUILock(openSession) : openSession()
@@ -142,7 +137,13 @@ public final class PluginRuntime {
             let selector = try parseSelector(object["selector"])
             return try withUILock {
                 try session.withLock {
-                    try accessibility.press(session: session, selector: selector, coordinateFallback: object["coordinate_fallback"]?.boolValue ?? false, forceCoordinate: object["force_coordinate"]?.boolValue ?? false)
+                    try accessibility.press(
+                        session: session,
+                        selector: selector,
+                        coordinateFallback: object["coordinate_fallback"]?.boolValue ?? false,
+                        forceCoordinate: object["force_coordinate"]?.boolValue ?? false,
+                        semanticAction: object["semantic_action"]?.stringValue ?? "press"
+                    )
                 }
             }
         case "desktop_type_text":

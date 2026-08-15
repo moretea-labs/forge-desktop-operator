@@ -83,26 +83,61 @@ public final class AccessibilityDriver {
         session: DesktopSessionState,
         selector: ElementSelector,
         coordinateFallback: Bool,
-        forceCoordinate: Bool = false
+        forceCoordinate: Bool = false,
+        semanticAction: String = "press"
     ) throws -> JSONValue {
-        if forceCoordinate {
-            throw PluginError(
-                code: "BACKGROUND_SAFE_COORDINATE_INPUT_DISABLED",
-                message: "Forge Desktop Operator silent mode does not synthesize pointer clicks or move the user's mouse. Use a semantic Accessibility action instead.",
-                retryable: false,
-                domain: "accessibility"
-            )
-        }
         let element = try resolveElement(session: session, selector: selector)
         prepare(element)
-        var result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+        if forceCoordinate {
+            guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                throw PluginError(
+                    code: "FOREGROUND_COORDINATE_INPUT_REQUIRES_ACTIVE_APP",
+                    message: "Explicit coordinate input is allowed only while the target application is already foreground.",
+                    retryable: true,
+                    domain: "accessibility"
+                )
+            }
+            guard let elementFrame = frame(of: element) else {
+                throw PluginError(code: "COORDINATE_PRESS_FRAME_INVALID", message: "Selected Accessibility element does not expose a clickable frame", retryable: false, domain: "accessibility")
+            }
+            let point = try Self.coordinateClickPoint(frame: elementFrame, displayBounds: Self.activeDisplayBounds())
+            try InputDriver.click(x: point.x, y: point.y)
+            return .object([
+                "method": .string("CGEvent_click_explicit_foreground"),
+                "x": .number(point.x),
+                "y": .number(point.y),
+                "snapshot_revision": .number(Double(session.record.snapshotRevision))
+            ])
+        }
+        let action: CFString
+        let method: String
+        switch semanticAction {
+        case "press":
+            action = kAXPressAction as CFString
+            method = "AXPress_background"
+        case "show_menu":
+            action = kAXShowMenuAction as CFString
+            method = "AXShowMenu_background"
+        case "pick":
+            action = kAXPickAction as CFString
+            method = "AXPick_background"
+        case "open":
+            action = "AXOpen" as CFString
+            method = "AXOpen_background"
+        case "confirm":
+            action = "AXConfirm" as CFString
+            method = "AXConfirm_background"
+        default:
+            throw PluginError.invalidArguments("desktop_press semantic_action must be press, show_menu, pick, open, or confirm")
+        }
+        var result = AXUIElementPerformAction(element, action)
         if result == .cannotComplete {
             Thread.sleep(forTimeInterval: 0.15)
-            result = AXUIElementPerformAction(element, kAXPressAction as CFString)
+            result = AXUIElementPerformAction(element, action)
         }
         if result == .success {
             return .object([
-                "method": .string("AXPress_background"),
+                "method": .string(method),
                 "snapshot_revision": .number(Double(session.record.snapshotRevision))
             ])
         }

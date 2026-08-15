@@ -105,6 +105,21 @@ public enum ApplicationDriver {
         throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
     }
 
+    public static func activate(_ application: NSRunningApplication, timeoutSeconds: TimeInterval = 2) throws {
+        guard !application.isTerminated, processIsAlive(application.processIdentifier) else {
+            throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application is no longer running", retryable: true, domain: "application")
+        }
+        guard application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) else {
+            throw PluginError(code: "APP_ACTIVATION_FAILED", message: "macOS refused explicit application activation", retryable: true, domain: "application")
+        }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if application.isActive { return }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        }
+        throw PluginError(code: "APP_ACTIVATION_TIMEOUT", message: "Target application did not become foreground after explicit activation", retryable: true, domain: "application")
+    }
+
     public static func ensureRunning(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> NSRunningApplication {
         if let running = findRunning(bundleIdentifier: bundleIdentifier, appName: appName) {
             return running
