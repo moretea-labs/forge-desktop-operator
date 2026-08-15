@@ -37,6 +37,74 @@ public enum ApplicationDriver {
         return errno == EPERM
     }
 
+    private final class SilentLaunchResult: @unchecked Sendable {
+        let lock = NSLock()
+        var application: NSRunningApplication?
+        var error: Error?
+
+        func store(application: NSRunningApplication?, error: Error?) {
+            lock.lock()
+            self.application = application
+            self.error = error
+            lock.unlock()
+        }
+
+        func snapshot() -> (NSRunningApplication?, Error?) {
+            lock.lock()
+            defer { lock.unlock() }
+            return (application, error)
+        }
+    }
+
+    private static func installedApplicationURL(bundleIdentifier: String?, appName: String?) -> URL? {
+        if let bundleIdentifier,
+           let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            return url
+        }
+        guard let appName else { return nil }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let candidates = [
+            "/Applications/\(appName).app",
+            "\(home)/Applications/\(appName).app",
+            "/System/Applications/\(appName).app",
+            "/System/Applications/Utilities/\(appName).app",
+        ]
+        return candidates.first(where: { FileManager.default.fileExists(atPath: $0) }).map(URL.init(fileURLWithPath:))
+    }
+
+    private static func launchSilently(applicationURL: URL, timeoutSeconds: TimeInterval = 8) throws -> NSRunningApplication {
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = false
+        configuration.addsToRecentItems = false
+
+        let result = SilentLaunchResult()
+        let completed = DispatchSemaphore(value: 0)
+        NSWorkspace.shared.openApplication(at: applicationURL, configuration: configuration) { application, error in
+            result.store(application: application, error: error)
+            completed.signal()
+        }
+
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while Date() < deadline {
+            if completed.wait(timeout: .now()) == .success {
+                let (application, error) = result.snapshot()
+                if let application { return application }
+                throw PluginError(
+                    code: "APP_LAUNCH_FAILED",
+                    message: error?.localizedDescription ?? "NSWorkspace did not return a running application",
+                    retryable: true,
+                    domain: "application"
+                )
+            }
+            if Thread.isMainThread {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.05))
+            } else {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+        }
+        throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
+    }
+
     public static func ensureRunning(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> NSRunningApplication {
         if let running = findRunning(bundleIdentifier: bundleIdentifier, appName: appName) {
             return running
@@ -48,6 +116,17 @@ public enum ApplicationDriver {
             throw PluginError.invalidArguments("desktop_session_open requires bundle_id or app_name")
         }
 
+        // Launch through NSWorkspace instead of `open -g` whenever the app bundle
+        // can be resolved. Electron apps such as Figma may otherwise leave a Unix
+        // process without registering a usable GUI application. `activates=false`
+        // preserves the Desktop Operator invariant that automation never steals
+        // foreground focus.
+        if let applicationURL = installedApplicationURL(bundleIdentifier: bundleIdentifier, appName: appName) {
+            return try launchSilently(applicationURL: applicationURL)
+        }
+
+        // Keep the previous generic fallback for applications that are discoverable
+        // by LaunchServices name but do not live in one of the bounded app roots.
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
         if let bundleIdentifier {
