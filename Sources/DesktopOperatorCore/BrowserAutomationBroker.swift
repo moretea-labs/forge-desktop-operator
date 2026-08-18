@@ -76,6 +76,9 @@ public final class BrowserAutomationBroker {
                 try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
                 browser: browser
             ))
+        case "list_tabs":
+            guard target == nil else { throw invalid("BROWSER_AUTOMATION_TAB_REF_UNSUPPORTED") }
+            return valueResult(try runAppleScript(listTabsScript(browser.appName), args: [], timeoutMs: timeoutMs))
         case "create_tab":
             let url = try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes)
             return try valueResult(runAppleScript(createTabScript(browser.appName), args: [url], timeoutMs: timeoutMs))
@@ -194,6 +197,58 @@ public final class BrowserAutomationBroker {
         set separator to ASCII character 30
         return (frontmost as text) & separator & (URL of targetTab as text) & separator & (title of targetTab as text) & separator & ((item 1 of windowBounds) as text) & separator & ((item 2 of windowBounds) as text) & separator & ((item 3 of windowBounds) as text) & separator & ((item 4 of windowBounds) as text)
         """)
+    }
+
+    private func listTabsScript(_ appName: String) -> String {
+        """
+        on replaceText(sourceText, needle, replacement)
+          set previousDelimiters to AppleScript's text item delimiters
+          set AppleScript's text item delimiters to needle
+          set sourceItems to every text item of sourceText
+          set AppleScript's text item delimiters to replacement
+          set resultText to sourceItems as text
+          set AppleScript's text item delimiters to previousDelimiters
+          return resultText
+        end replaceText
+
+        on cleanField(sourceText, recordSeparator, fieldSeparator)
+          set cleaned to my replaceText(sourceText as text, recordSeparator, " ")
+          return my replaceText(cleaned, fieldSeparator, " ")
+        end cleanField
+
+        \(tell(appName, """
+        set recordSeparator to ASCII character 30
+        set fieldSeparator to ASCII character 31
+        set maxTabs to 256
+        set returnedCount to 0
+        set truncatedInventory to false
+        set outputText to "false"
+        repeat with candidateWindow in windows
+          set activeTabId to ""
+          try
+            set activeTabId to ((id of active tab of candidateWindow) as text)
+          end try
+          repeat with candidateTab in tabs of candidateWindow
+            if returnedCount is greater than or equal to maxTabs then
+              set truncatedInventory to true
+              exit repeat
+            end if
+            set candidateWindowId to ((id of candidateWindow) as text)
+            set candidateTabId to ((id of candidateTab) as text)
+            set candidateURL to my cleanField((URL of candidateTab as text), recordSeparator, fieldSeparator)
+            set candidateTitle to my cleanField((title of candidateTab as text), recordSeparator, fieldSeparator)
+            set candidateActive to (candidateTabId is activeTabId)
+            set outputText to outputText & recordSeparator & candidateWindowId & fieldSeparator & candidateTabId & fieldSeparator & (candidateActive as text) & fieldSeparator & candidateURL & fieldSeparator & candidateTitle
+            set returnedCount to returnedCount + 1
+          end repeat
+          if truncatedInventory then exit repeat
+        end repeat
+        if truncatedInventory then
+          set outputText to "true" & text 6 thru -1 of outputText
+        end if
+        return outputText
+        """))
+        """
     }
 
     private func createTabScript(_ appName: String) -> String {

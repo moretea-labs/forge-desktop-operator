@@ -129,6 +129,60 @@ import Testing
     #expect(arguments.contains("https://example.com/next"))
 }
 
+@Test func browserAutomationBrokerListsCurrentTabsWithoutChangingBrowserState() throws {
+    var script = ""
+    let recordSeparator = String(UnicodeScalar(30)!)
+    let fieldSeparator = String(UnicodeScalar(31)!)
+    let payload = [
+        "false",
+        ["10", "20", "true", "https://appstoreconnect.apple.com/apps/6775778505/distribution", "App Store Connect"].joined(separator: fieldSeparator),
+        ["11", "21", "false", "https://example.com", "Example"].joined(separator: fieldSeparator),
+    ].joined(separator: recordSeparator)
+    let broker = BrowserAutomationBroker { _, args, _ in
+        script = args.joined(separator: "\n")
+        return BrowserAutomationCommandResult(status: 0, stdout: payload)
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "list-tabs",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("list_tabs"),
+            "product": .string("chrome")
+        ])
+    ))
+    #expect(response.ok)
+    #expect(response.result?["value"]?.stringValue == payload)
+    #expect(script.contains("repeat with candidateWindow in windows"))
+    #expect(script.contains("repeat with candidateTab in tabs of candidateWindow"))
+    #expect(script.contains("set maxTabs to 256"))
+    #expect(!script.contains("activate\n"))
+    #expect(!script.contains("set active tab index"))
+    #expect(!script.contains("make new tab"))
+    #expect(!script.contains("close candidateTab"))
+}
+
+@Test func browserAutomationBrokerRejectsTargetedTabInventory() throws {
+    var calls = 0
+    let broker = BrowserAutomationBroker { _, _, _ in
+        calls += 1
+        return BrowserAutomationCommandResult(status: 0, stdout: "false")
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "list-tabs-targeted",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("list_tabs"),
+            "product": .string("chrome"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")])
+        ])
+    ))
+    #expect(!response.ok)
+    #expect(response.error?.code == "BROWSER_AUTOMATION_TAB_REF_UNSUPPORTED")
+    #expect(calls == 0)
+}
+
 @Test func browserAutomationBrokerCreatesBackgroundTabWithoutActivatingIt() throws {
     var script = ""
     let broker = BrowserAutomationBroker { _, args, _ in
