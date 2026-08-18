@@ -84,15 +84,7 @@ public final class BrowserAutomationBroker {
             return try valueResult(runAppleScript(closeTabScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
         case "navigate":
             let url = try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes)
-            if target != nil {
-                throw PluginError(
-                    code: "BROWSER_AUTOMATION_BACKGROUND_NAVIGATION_REQUIRES_REPLACEMENT",
-                    message: "Chrome/Vivaldi background tabs cannot be navigated reliably in place through Apple Events; create a replacement tab instead.",
-                    retryable: true,
-                    domain: "browser"
-                )
-            }
-            return try valueResult(runAppleScript(navigateScript(browser.appName, nil), args: [url], timeoutMs: timeoutMs))
+            return try valueResult(runAppleScript(navigateScript(browser.appName, target), args: [url], timeoutMs: timeoutMs))
         case "reload":
             return try valueResult(runAppleScript(reloadScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
         case "execute_javascript":
@@ -191,7 +183,7 @@ public final class BrowserAutomationBroker {
             set windowBounds to bounds of targetWindow
             set separator to ASCII character 30
             set targetIsActive to ((id of active tab of targetWindow) is (id of targetTab))
-            return (frontmost as text) & separator & (URL of targetTab as text) & separator & "" & separator & ((item 1 of windowBounds) as text) & separator & ((item 2 of windowBounds) as text) & separator & ((item 3 of windowBounds) as text) & separator & ((item 4 of windowBounds) as text) & separator & "" & separator & "" & separator & (targetIsActive as text) & separator & (loading of targetTab as text)
+            return (frontmost as text) & separator & (URL of targetTab as text) & separator & "" & separator & ((item 1 of windowBounds) as text) & separator & ((item 2 of windowBounds) as text) & separator & ((item 3 of windowBounds) as text) & separator & ((item 4 of windowBounds) as text) & separator & ((id of targetWindow) as text) & separator & ((id of targetTab) as text) & separator & (targetIsActive as text) & separator & (loading of targetTab as text)
             """)
         }
         return tell(appName, """
@@ -264,7 +256,30 @@ public final class BrowserAutomationBroker {
     }
 
     private func targetPreamble(_ target: TabRef) -> String {
-        "set targetWindow to first window whose id is \(quoted(target.windowId))\nset targetTab to first tab of targetWindow whose id is \(quoted(target.tabId))"
+        """
+        set targetTabId to \(quoted(target.tabId))
+        set targetWindow to missing value
+        set targetTab to missing value
+        try
+          set hintedWindow to first window whose id is \(quoted(target.windowId))
+          set hintedTab to first tab of hintedWindow whose id is targetTabId
+          set targetWindow to hintedWindow
+          set targetTab to hintedTab
+        end try
+        if targetTab is missing value then
+          repeat with candidateWindow in windows
+            repeat with candidateTab in tabs of candidateWindow
+              if ((id of candidateTab) as text) is targetTabId then
+                set targetWindow to candidateWindow
+                set targetTab to candidateTab
+                exit repeat
+              end if
+            end repeat
+            if targetTab is not missing value then exit repeat
+          end repeat
+        end if
+        if targetTab is missing value then error "FORGE_BROWSER_TAB_NOT_FOUND:" & targetTabId
+        """
     }
 
     private func tell(_ appName: String, _ body: String) -> String {

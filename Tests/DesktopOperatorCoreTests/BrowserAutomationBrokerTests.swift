@@ -102,9 +102,13 @@ import Testing
 }
 
 
-@Test func browserAutomationBrokerRejectsTargetedBackgroundNavigate() throws {
-    let broker = BrowserAutomationBroker { _, _, _ in
-        BrowserAutomationCommandResult(status: 0, stdout: "")
+@Test func browserAutomationBrokerNavigatesTargetedBackgroundTabInPlace() throws {
+    var script = ""
+    var arguments: [String] = []
+    let broker = BrowserAutomationBroker { _, args, _ in
+        script = args.first(where: { $0.contains("tell application") }) ?? ""
+        arguments = args
+        return BrowserAutomationCommandResult(status: 0, stdout: "https://example.com/next")
     }
     let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
         id: "targeted-navigate",
@@ -117,8 +121,12 @@ import Testing
             "ref": .object(["windowId": .string("10"), "tabId": .string("20")])
         ])
     ))
-    #expect(!response.ok)
-    #expect(response.error?.code == "BROWSER_AUTOMATION_BACKGROUND_NAVIGATION_REQUIRES_REPLACEMENT")
+    #expect(response.ok)
+    #expect(script.contains("set targetTabId to \"20\""))
+    #expect(script.contains("repeat with candidateWindow in windows"))
+    #expect(script.contains("set URL of targetTab to targetUrl"))
+    #expect(!script.contains("activate"))
+    #expect(arguments.contains("https://example.com/next"))
 }
 
 @Test func browserAutomationBrokerCreatesBackgroundTabWithoutActivatingIt() throws {
@@ -165,30 +173,28 @@ import Testing
     let originalURL = before[1]
     let originalFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
     let oldRef = try create("about:blank")
-    var currentRef = oldRef
-    defer { _ = try? value("close_tab", extra: ["ref": currentRef]); _ = try? value("close_tab", extra: ["ref": oldRef]) }
+    defer { _ = try? value("close_tab", extra: ["ref": oldRef]) }
     let target = try value("metadata", extra: ["ref": oldRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
     #expect(target.count >= 10)
     #expect(target[9] == "false")
     #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
     #expect(try value("execute_javascript", extra: ["ref": oldRef, "source": .string("document.location.href")]).contains("about:blank"))
 
-    let replacementURL = "data:text/html,%3Ctitle%3EForge%20E2E%3C%2Ftitle%3E%3Cbody%3Eok%3C%2Fbody%3E"
-    let replacementRef = try create(replacementURL)
-    currentRef = replacementRef
+    let navigatedURL = "data:text/html,%3Ctitle%3EForge%20E2E%3C%2Ftitle%3E%3Cbody%3Eok%3C%2Fbody%3E"
+    _ = try value("navigate", extra: ["ref": oldRef, "url": .string(navigatedURL)])
     Thread.sleep(forTimeInterval: 0.7)
-    let replacementMetadata = try value("metadata", extra: ["ref": replacementRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
-    #expect(replacementMetadata[9] == "false")
+    let navigatedMetadata = try value("metadata", extra: ["ref": oldRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+    #expect(navigatedMetadata[9] == "false")
+    #expect(navigatedMetadata[8] == oldRef.objectValue?["tabId"]?.stringValue)
     #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
-    #expect(try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.location.href")]).hasPrefix("data:text/html"))
-    #expect(try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.title")]) == "Forge E2E")
-    _ = try value("close_tab", extra: ["ref": oldRef])
+    #expect(try value("execute_javascript", extra: ["ref": oldRef, "source": .string("document.location.href")]).hasPrefix("data:text/html"))
+    #expect(try value("execute_javascript", extra: ["ref": oldRef, "source": .string("document.title")]) == "Forge E2E")
 
-    _ = try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.title = 'forge-live-e2e-marker'; document.title")])
-    _ = try value("reload", extra: ["ref": replacementRef])
+    _ = try value("execute_javascript", extra: ["ref": oldRef, "source": .string("document.title = 'forge-live-e2e-marker'; document.title")])
+    _ = try value("reload", extra: ["ref": oldRef])
     Thread.sleep(forTimeInterval: 0.3)
-    #expect(try value("execute_javascript", extra: ["ref": replacementRef, "source": .string("document.title")]) == "Forge E2E")
-    _ = try value("close_tab", extra: ["ref": replacementRef])
+    #expect(try value("execute_javascript", extra: ["ref": oldRef, "source": .string("document.title")]) == "Forge E2E")
+    _ = try value("close_tab", extra: ["ref": oldRef])
     let after = try value("metadata").split(separator: separator, omittingEmptySubsequences: false).map(String.init)
     #expect(after[1] == originalURL)
     #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
