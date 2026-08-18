@@ -48,6 +48,23 @@ import Testing
     }
 }
 
+@Test func permissionRequestShortCircuitsWhenPermissionIsAlreadyGranted() {
+    var requestCount = 0
+    let granted = PluginRuntime.requestPermissionIfNeeded(granted: true) {
+        requestCount += 1
+        return false
+    }
+    #expect(granted)
+    #expect(requestCount == 0)
+
+    let requested = PluginRuntime.requestPermissionIfNeeded(granted: false) {
+        requestCount += 1
+        return true
+    }
+    #expect(requested)
+    #expect(requestCount == 1)
+}
+
 @Test func permissionRequestIsDeclaredAndRejectsUnknownServicesBeforePrompting() throws {
     #expect(PluginManifest.current.capabilities.contains("desktop.permissions"))
     #expect(PluginManifest.current.actions.contains("desktop_permissions_request"))

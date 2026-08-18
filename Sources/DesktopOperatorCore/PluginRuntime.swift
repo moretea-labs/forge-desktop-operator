@@ -21,6 +21,11 @@ public final class PluginRuntime {
         self.browserAutomation = browserAutomation
     }
 
+    static func requestPermissionIfNeeded(granted: Bool, request: () -> Bool) -> Bool {
+        if granted { return true }
+        return request()
+    }
+
     public func handle(_ request: RPCRequest) -> RPCResponse {
         do {
             return RPCResponse(id: request.id, result: try dispatch(request))
@@ -79,9 +84,13 @@ public final class PluginRuntime {
                 var requested: [String: JSONValue] = [:]
                 for service in services {
                     if service == "accessibility" {
-                        requested[service] = .bool(AccessibilityDriver.requestTrustPrompt())
+                        requested[service] = .bool(Self.requestPermissionIfNeeded(granted: accessibility.trusted) {
+                            AccessibilityDriver.requestTrustPrompt()
+                        })
                     } else {
-                        requested[service] = .bool(ScreenshotDriver.requestScreenRecordingAccess())
+                        requested[service] = .bool(Self.requestPermissionIfNeeded(granted: ScreenshotDriver.screenRecordingGranted) {
+                            ScreenshotDriver.requestScreenRecordingAccess()
+                        })
                     }
                 }
                 let current = health()
