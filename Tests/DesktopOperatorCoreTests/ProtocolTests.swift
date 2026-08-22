@@ -85,3 +85,9 @@ import Testing
     #expect(ApplicationDriver.processIsAlive(ProcessInfo.processInfo.processIdentifier))
     #expect(!ApplicationDriver.processIsAlive(Int32.max))
 }
+
+@Test func foregroundIdentityUsesOneAuthoritativeFrontmostPID() {
+    #expect(ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: 42))
+    #expect(!ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: 43))
+    #expect(!ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: nil))
+}

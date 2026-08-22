@@ -174,8 +174,12 @@ public enum ApplicationDriver {
         throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
     }
 
+    static func foregroundMatches(pid: Int32, frontmostPID: Int32?) -> Bool {
+        frontmostPID == pid
+    }
+
     public static func isActive(pid: Int32) -> Bool {
-        NSWorkspace.shared.frontmostApplication?.processIdentifier == pid
+        foregroundMatches(pid: pid, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
     }
 
     public static func openURL(_ value: String) throws {
@@ -228,12 +232,13 @@ public enum ApplicationDriver {
     }
 
     public static func runningApplicationSummaries(limit: Int = 100) -> [JSONValue] {
-        NSWorkspace.shared.runningApplications.prefix(max(1, min(limit, 500))).map { app in
+        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        return NSWorkspace.shared.runningApplications.prefix(max(1, min(limit, 500))).map { app in
             .object([
                 "pid": .number(Double(app.processIdentifier)),
                 "name": app.localizedName.map(JSONValue.string) ?? .null,
                 "bundle_id": app.bundleIdentifier.map(JSONValue.string) ?? .null,
-                "active": .bool(app.isActive),
+                "active": .bool(foregroundMatches(pid: app.processIdentifier, frontmostPID: frontmostPID)),
                 "hidden": .bool(app.isHidden),
                 "terminated": .bool(app.isTerminated)
             ])
