@@ -12,10 +12,19 @@ public struct DesktopSessionRecord: Codable, Equatable, Sendable {
     public var snapshotRevision: Int
 }
 
+public struct DesktopVisualEvidence: Equatable, Sendable {
+    public let revision: Int
+    public let windowId: UInt32
+    public let frame: DesktopFrame
+    public let capturedAt: Date
+}
+
 public final class DesktopSessionState {
     public var record: DesktopSessionRecord
     public var elements: [String: AXUIElement] = [:]
     public var lastRootElement: AXUIElement?
+    public var visualRevision: Int = 0
+    public var lastVisualEvidence: DesktopVisualEvidence?
     private let lock = NSRecursiveLock()
 
     public init(record: DesktopSessionRecord) {

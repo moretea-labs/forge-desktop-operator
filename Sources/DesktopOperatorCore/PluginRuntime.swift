@@ -155,6 +155,49 @@ public final class PluginRuntime {
                     )
                 }
             }
+        case "desktop_pointer_click":
+            let session = try session(from: object)
+            let windowId = try requiredWindowId(object["window_id"], name: "window_id")
+            guard let visualRevision = object["visual_revision"]?.intValue, visualRevision >= 1 else {
+                throw PluginError.invalidArguments("desktop_pointer_click requires a positive visual_revision")
+            }
+            let x = try requiredNumber(object["x"], name: "x")
+            let y = try requiredNumber(object["y"], name: "y")
+            return try withUILock {
+                try session.withLock {
+                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                        throw PluginError(
+                            code: "FOREGROUND_POINTER_INPUT_REQUIRES_ACTIVE_APP",
+                            message: "Pointer input is allowed only while the target application is already foreground; Forge Desktop Operator will not activate it automatically.",
+                            retryable: true,
+                            domain: "input"
+                        )
+                    }
+                    let currentWindow = ApplicationDriver.windows(pid: session.record.pid).first { $0.windowId == windowId }
+                    let validatedFrame = try Self.validatePointerClickEvidence(
+                        evidence: session.lastVisualEvidence,
+                        requestedRevision: visualRevision,
+                        requestedWindowId: windowId,
+                        x: x,
+                        y: y,
+                        currentWindow: currentWindow
+                    )
+                    let immediateWindow = ApplicationDriver.windows(pid: session.record.pid).first { $0.windowId == windowId }
+                    guard immediateWindow?.onScreen == true, immediateWindow?.frame == validatedFrame else {
+                        throw PluginError(code: "POINTER_CLICK_WINDOW_CHANGED", message: "Target window changed after validation; capture a fresh window screenshot before clicking.", retryable: true, domain: "input")
+                    }
+                    try InputDriver.click(x: x, y: y)
+                    return .object([
+                        "clicked": .bool(true),
+                        "method": .string("CGEvent_pointer"),
+                        "interaction_id": .string(session.record.interactionId),
+                        "window_id": .number(Double(windowId)),
+                        "visual_revision": .number(Double(visualRevision)),
+                        "x": .number(x),
+                        "y": .number(y)
+                    ])
+                }
+            }
         case "desktop_type_text":
             let session = try session(from: object)
             let selector = try parseSelector(object["selector"])
@@ -226,7 +269,32 @@ public final class PluginRuntime {
             }
         case "desktop_screenshot":
             let scope = object["scope"]?.stringValue ?? "display"
-            var windowId = object["window_id"]?.intValue.map(UInt32.init)
+            let requestedWindowId = object["window_id"] == nil ? nil : try requiredWindowId(object["window_id"], name: "window_id")
+            if scope == "window", let interactionId = object["interaction_id"]?.stringValue, let windowId = requestedWindowId {
+                let session = try sessions.get(interactionId)
+                return try session.withLock {
+                    guard let before = ApplicationDriver.windows(pid: session.record.pid).first(where: { $0.windowId == windowId }),
+                          before.onScreen, let beforeFrame = before.frame, beforeFrame.width > 0, beforeFrame.height > 0 else {
+                        throw PluginError(code: "SCREENSHOT_WINDOW_UNAVAILABLE", message: "The requested session window is missing, off-screen, or has invalid bounds.", retryable: true, domain: "capture")
+                    }
+                    let result = try ScreenshotDriver.capture(scope: scope, windowId: windowId, label: object["label"]?.stringValue)
+                    guard let after = ApplicationDriver.windows(pid: session.record.pid).first(where: { $0.windowId == windowId }),
+                          after.onScreen, after.frame == beforeFrame else {
+                        throw PluginError(code: "SCREENSHOT_WINDOW_CHANGED_DURING_CAPTURE", message: "The target window moved, resized, or disappeared during capture; retry before pointer input.", retryable: true, domain: "capture")
+                    }
+                    session.visualRevision += 1
+                    let evidence = DesktopVisualEvidence(revision: session.visualRevision, windowId: windowId, frame: beforeFrame, capturedAt: result.capturedAt)
+                    session.lastVisualEvidence = evidence
+                    guard var payload = (try JSONValue.encode(result)).objectValue else {
+                        throw PluginError(code: "SCREENSHOT_RESULT_INVALID", message: "Screenshot result could not be encoded as an object.", retryable: false, domain: "capture")
+                    }
+                    payload["interaction_id"] = .string(interactionId)
+                    payload["visual_revision"] = .number(Double(evidence.revision))
+                    payload["window_frame"] = try JSONValue.encode(evidence.frame)
+                    return .object(payload)
+                }
+            }
+            var windowId = requestedWindowId
             if windowId == nil, let interactionId = object["interaction_id"]?.stringValue {
                 let session = try sessions.get(interactionId)
                 windowId = ApplicationDriver.windows(pid: session.record.pid).first?.windowId
@@ -309,6 +377,52 @@ public final class PluginRuntime {
             "stopped_at": stoppedAt.map { .number(Double($0)) } ?? .null,
             "results": .array(results)
         ])
+    }
+
+    static func validatePointerClickEvidence(
+        evidence: DesktopVisualEvidence?,
+        requestedRevision: Int,
+        requestedWindowId: UInt32,
+        x: Double,
+        y: Double,
+        currentWindow: DesktopWindow?,
+        now: Date = Date(),
+        maxAgeSeconds: TimeInterval = 15
+    ) throws -> DesktopFrame {
+        guard let evidence else {
+            throw PluginError(code: "POINTER_CLICK_VISUAL_EVIDENCE_REQUIRED", message: "Capture the explicit target window before pointer input.", retryable: true, domain: "input")
+        }
+        guard evidence.revision == requestedRevision, evidence.windowId == requestedWindowId else {
+            throw PluginError(code: "POINTER_CLICK_STALE_VISUAL_REVISION", message: "visual_revision does not match the latest screenshot evidence for this session and window.", retryable: true, domain: "input")
+        }
+        let age = now.timeIntervalSince(evidence.capturedAt)
+        guard age >= 0, age <= maxAgeSeconds else {
+            throw PluginError(code: "POINTER_CLICK_STALE_VISUAL_REVISION", message: "Window screenshot evidence is too old for pointer input; capture the window again.", retryable: true, domain: "input")
+        }
+        guard let currentWindow, currentWindow.onScreen, let frame = currentWindow.frame, frame.width > 0, frame.height > 0 else {
+            throw PluginError(code: "POINTER_CLICK_WINDOW_UNAVAILABLE", message: "Target window is missing, off-screen, or has invalid bounds.", retryable: true, domain: "input")
+        }
+        guard frame == evidence.frame else {
+            throw PluginError(code: "POINTER_CLICK_WINDOW_CHANGED", message: "Target window moved or resized since the screenshot; capture a fresh window screenshot.", retryable: true, domain: "input")
+        }
+        guard x >= frame.x, x < frame.x + frame.width, y >= frame.y, y < frame.y + frame.height else {
+            throw PluginError(code: "POINTER_CLICK_OUTSIDE_WINDOW", message: "Pointer coordinates are outside the authorized target window bounds.", retryable: false, domain: "input")
+        }
+        return frame
+    }
+
+    private func requiredNumber(_ value: JSONValue?, name: String) throws -> Double {
+        guard case .number(let number)? = value, number.isFinite else {
+            throw PluginError.invalidArguments("\(name) must be a finite number")
+        }
+        return number
+    }
+
+    private func requiredWindowId(_ value: JSONValue?, name: String) throws -> UInt32 {
+        guard let integer = value?.intValue, integer >= 0, integer <= Int(UInt32.max) else {
+            throw PluginError.invalidArguments("\(name) must be an unsigned 32-bit integer")
+        }
+        return UInt32(integer)
     }
 
     private func session(from object: [String: JSONValue]) throws -> DesktopSessionState {

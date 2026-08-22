@@ -91,3 +91,108 @@ import Testing
     #expect(!ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: 43))
     #expect(!ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: nil))
 }
+
+
+private func pointerTestWindow(frame: DesktopFrame, onScreen: Bool = true) -> DesktopWindow {
+    DesktopWindow(windowId: 77, pid: 42, ownerName: "Test", title: "Window", layer: 0, alpha: 1, onScreen: onScreen, frame: frame)
+}
+
+@Test func pointerClickAcceptsFreshMatchingWindowEvidence() throws {
+    let capturedAt = Date()
+    let frame = DesktopFrame(x: 100, y: 200, width: 400, height: 300)
+    let evidence = DesktopVisualEvidence(revision: 3, windowId: 77, frame: frame, capturedAt: capturedAt)
+    let validated = try PluginRuntime.validatePointerClickEvidence(
+        evidence: evidence,
+        requestedRevision: 3,
+        requestedWindowId: 77,
+        x: 250,
+        y: 350,
+        currentWindow: pointerTestWindow(frame: frame),
+        now: capturedAt.addingTimeInterval(1)
+    )
+    #expect(validated == frame)
+}
+
+@Test func pointerClickRejectsStaleVisualRevisionBeforeInput() {
+    let capturedAt = Date()
+    let frame = DesktopFrame(x: 100, y: 200, width: 400, height: 300)
+    let evidence = DesktopVisualEvidence(revision: 3, windowId: 77, frame: frame, capturedAt: capturedAt)
+    do {
+        _ = try PluginRuntime.validatePointerClickEvidence(
+            evidence: evidence,
+            requestedRevision: 2,
+            requestedWindowId: 77,
+            x: 250,
+            y: 350,
+            currentWindow: pointerTestWindow(frame: frame),
+            now: capturedAt.addingTimeInterval(1)
+        )
+        Issue.record("Expected stale visual revision rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "POINTER_CLICK_STALE_VISUAL_REVISION")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test func pointerClickRejectsOutsideOrChangedWindowBeforeInput() {
+    let capturedAt = Date()
+    let frame = DesktopFrame(x: 100, y: 200, width: 400, height: 300)
+    let evidence = DesktopVisualEvidence(revision: 4, windowId: 77, frame: frame, capturedAt: capturedAt)
+    do {
+        _ = try PluginRuntime.validatePointerClickEvidence(
+            evidence: evidence,
+            requestedRevision: 4,
+            requestedWindowId: 77,
+            x: 99,
+            y: 350,
+            currentWindow: pointerTestWindow(frame: frame),
+            now: capturedAt.addingTimeInterval(1)
+        )
+        Issue.record("Expected outside-window rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "POINTER_CLICK_OUTSIDE_WINDOW")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+
+    let moved = DesktopFrame(x: 110, y: 200, width: 400, height: 300)
+    do {
+        _ = try PluginRuntime.validatePointerClickEvidence(
+            evidence: evidence,
+            requestedRevision: 4,
+            requestedWindowId: 77,
+            x: 250,
+            y: 350,
+            currentWindow: pointerTestWindow(frame: moved),
+            now: capturedAt.addingTimeInterval(1)
+        )
+        Issue.record("Expected moved-window rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "POINTER_CLICK_WINDOW_CHANGED")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}
+
+@Test func pointerClickRejectsExpiredVisualEvidence() {
+    let capturedAt = Date()
+    let frame = DesktopFrame(x: 100, y: 200, width: 400, height: 300)
+    let evidence = DesktopVisualEvidence(revision: 5, windowId: 77, frame: frame, capturedAt: capturedAt)
+    do {
+        _ = try PluginRuntime.validatePointerClickEvidence(
+            evidence: evidence,
+            requestedRevision: 5,
+            requestedWindowId: 77,
+            x: 250,
+            y: 350,
+            currentWindow: pointerTestWindow(frame: frame),
+            now: capturedAt.addingTimeInterval(16)
+        )
+        Issue.record("Expected expired-evidence rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "POINTER_CLICK_STALE_VISUAL_REVISION")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+}

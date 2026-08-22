@@ -42,6 +42,7 @@ public struct PluginManifest: Codable, Equatable, Sendable {
             "desktop_session_open",
             "desktop_observe",
             "desktop_press",
+            "desktop_pointer_click",
             "desktop_type_text",
             "desktop_key",
             "desktop_clipboard_read",
@@ -87,7 +88,7 @@ public enum DesktopPermissions {
             service: "accessibility",
             granted: granted,
             settingsPath: "Privacy & Security > Accessibility",
-            requiredFor: ["desktop_observe", "desktop_press", "desktop_type_text", "desktop_key", "desktop_copy", "desktop_paste", "desktop_batch"],
+            requiredFor: ["desktop_observe", "desktop_press", "desktop_pointer_click", "desktop_type_text", "desktop_key", "desktop_copy", "desktop_paste", "desktop_batch"],
             bundleIdentifier: DesktopOperatorIdentity.bundleIdentifier,
             applicationName: DesktopOperatorIdentity.displayName,
             applicationPath: DesktopOperatorIdentity.bundlePath

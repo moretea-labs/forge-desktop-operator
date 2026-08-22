@@ -39,6 +39,7 @@
     "desktop_session_open",
     "desktop_observe",
     "desktop_press",
+    "desktop_pointer_click",
     "desktop_type_text",
     "desktop_key",
     "desktop_clipboard_read",
