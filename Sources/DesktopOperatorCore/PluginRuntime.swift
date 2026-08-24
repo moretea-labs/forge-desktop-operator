@@ -5,7 +5,7 @@ import Foundation
 
 public final class PluginRuntime {
     public let startedAt = Date()
-    public let sessions = DesktopSessionStore()
+    public let sessions: DesktopSessionStore
     public let accessibility = AccessibilityDriver()
     public let browserAutomation: BrowserAutomationBroker
     public private(set) var shutdownRequested = false
@@ -15,10 +15,12 @@ public final class PluginRuntime {
 
     public init(
         socketPath: String = PluginPaths.defaultSocketPath,
-        browserAutomation: BrowserAutomationBroker = BrowserAutomationBroker()
+        browserAutomation: BrowserAutomationBroker = BrowserAutomationBroker(),
+        sessions: DesktopSessionStore = DesktopSessionStore(statePath: nil)
     ) {
         self.socketPath = socketPath
         self.browserAutomation = browserAutomation
+        self.sessions = sessions
     }
 
     static func requestPermissionIfNeeded(granted: Bool, request: () -> Bool) -> Bool {
@@ -40,6 +42,7 @@ public final class PluginRuntime {
         var warnings: [String] = []
         if !accessibility.trusted { warnings.append("Accessibility permission is not granted") }
         if !ScreenshotDriver.screenRecordingGranted { warnings.append("Screen Recording permission is not granted") }
+        if let loadError = sessions.loadError { warnings.append("Desktop session persistence is unavailable: \(loadError)") }
         return HealthResult(
             state: warnings.isEmpty ? "ready" : "degraded",
             checkedAt: Date(),
@@ -54,6 +57,9 @@ public final class PluginRuntime {
                 DesktopPermissions.accessibility(granted: accessibility.trusted),
                 DesktopPermissions.screenRecording(granted: ScreenshotDriver.screenRecordingGranted),
             ],
+            internalCapabilities: ["macos_browser_automation.v1"],
+            browserAutomationProtocolVersion: BrowserAutomationBroker.protocolVersion,
+            browserAutomationActions: BrowserAutomationBroker.supportedActions,
             warnings: warnings
         )
     }
@@ -105,6 +111,7 @@ public final class PluginRuntime {
             let appName = object["app_name"]?.stringValue
             let launch = object["launch"]?.boolValue ?? true
             let activate = object["activate"]?.boolValue ?? false
+            let reuseExisting = object["reuse_existing"]?.boolValue ?? true
             let openSession: () throws -> JSONValue = {
                 let application = try ApplicationDriver.ensureRunning(
                     bundleIdentifier: bundleId,
@@ -114,7 +121,7 @@ public final class PluginRuntime {
                 if activate {
                     try ApplicationDriver.activate(application)
                 }
-                return try JSONValue.encode(self.sessions.create(application: application).record)
+                return try JSONValue.encode(self.sessions.create(application: application, reuseExisting: reuseExisting).record)
             }
             return try launch ? withUILock(openSession) : openSession()
         case "desktop_observe":
@@ -126,7 +133,7 @@ public final class PluginRuntime {
             // press/type calls, so skip those IPCs unless the caller opts back in.
             let includeActions = object["include_actions"]?.boolValue ?? !focused
             let includeWindows = object["include_windows"]?.boolValue ?? !focused
-            return try session.withLock {
+            let result: JSONValue = try session.withLock {
                 let snapshot = try accessibility.snapshot(
                     session: session,
                     maxDepth: object["max_depth"]?.intValue ?? 8,
@@ -141,6 +148,8 @@ public final class PluginRuntime {
                     "windows": try JSONValue.encode(windows)
                 ])
             }
+            try sessions.checkpoint(session)
+            return result
         case "desktop_press":
             let session = try session(from: object)
             let selector = try parseSelector(object["selector"])
@@ -304,7 +313,7 @@ public final class PluginRuntime {
             return try withUILock { try executeBatch(object) }
         case "desktop_session_close":
             guard let interactionId = object["interaction_id"]?.stringValue else { throw PluginError.invalidArguments("desktop_session_close requires interaction_id") }
-            return .object(["closed": .bool(sessions.remove(interactionId)), "interaction_id": .string(interactionId)])
+            return .object(["closed": .bool(try sessions.remove(interactionId)), "interaction_id": .string(interactionId)])
         default:
             throw PluginError.unsupported("Unknown action \(action)")
         }
@@ -319,7 +328,10 @@ public final class PluginRuntime {
                 pluginId: PluginManifest.current.id,
                 pluginVersion: PluginManifest.current.version,
                 processId: getpid(),
-                startedAt: startedAt
+                startedAt: startedAt,
+                internalCapabilities: ["macos_browser_automation.v1"],
+                browserAutomationProtocolVersion: BrowserAutomationBroker.protocolVersion,
+                browserAutomationActions: BrowserAutomationBroker.supportedActions
             ))
         case "manifest":
             return try JSONValue.encode(PluginManifest.current)

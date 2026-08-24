@@ -64,6 +64,9 @@ public struct HandshakeResult: Codable, Equatable, Sendable {
     public let pluginVersion: String
     public let processId: Int32
     public let startedAt: Date
+    public let internalCapabilities: [String]
+    public let browserAutomationProtocolVersion: Int
+    public let browserAutomationActions: [String]
 }
 
 public enum DesktopOperatorIdentity {
@@ -119,5 +122,8 @@ public struct HealthResult: Codable, Equatable, Sendable {
     public let providerBundleIdentifier: String
     public let providerApplicationPath: String
     public let permissions: [DesktopPermissionReadiness]
+    public let internalCapabilities: [String]
+    public let browserAutomationProtocolVersion: Int
+    public let browserAutomationActions: [String]
     public let warnings: [String]
 }

@@ -26,7 +26,7 @@ let command = arguments.first ?? "help"
     case "serve":
         let path = option("--socket", in: arguments) ?? PluginPaths.defaultSocketPath
         try PluginPaths.ensureRuntimeDirectories()
-        let runtime = PluginRuntime(socketPath: path)
+        let runtime = PluginRuntime(socketPath: path, sessions: DesktopSessionStore())
         let server = UnixSocketServer(path: path, runtime: runtime)
         fputs("desktop-operator listening at \(path)\n", stderr)
         try server.run()
@@ -34,11 +34,11 @@ let command = arguments.first ?? "help"
         try printEncoded(PluginManifest.current)
     case "health":
         let path = option("--socket", in: arguments) ?? PluginPaths.defaultSocketPath
-        let runtime = PluginRuntime(socketPath: path)
+        let runtime = PluginRuntime(socketPath: path, sessions: DesktopSessionStore())
         try printEncoded(runtime.health())
     case "doctor":
         let path = option("--socket", in: arguments) ?? PluginPaths.defaultSocketPath
-        let runtime = PluginRuntime(socketPath: path)
+        let runtime = PluginRuntime(socketPath: path, sessions: DesktopSessionStore())
         let output: JSONValue = .object([
             "manifest": try JSONValue.encode(PluginManifest.current),
             "health": try JSONValue.encode(runtime.health()),

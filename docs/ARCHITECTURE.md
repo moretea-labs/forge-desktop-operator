@@ -56,6 +56,7 @@ The plugin does not request confirmation for each click, key, or screenshot. The
   releases/<version>/bin/desktop-operator
   registration/registration.json
   registration/forge-plugin.json          # protocol manifest filename retained for compatibility
+  desktop-sessions.json                    # durable app-session identity; never AX/visual refs
   artifacts/
   logs/
 ```
@@ -63,6 +64,10 @@ The plugin does not request confirmation for each click, key, or screenshot. The
 The short-lived socket and lock live under `~/Library/Caches/Forge/desktop-operator.sock{,.lock}` to stay well below the macOS Unix socket path limit. A non-blocking process lock prevents multiple service instances from unlinking each other's sockets.
 
 The LaunchAgent always executes the Mach-O inside `Forge Desktop Operator.app`. The installer prefers a persistent Developer ID or Apple Development signing identity, so replacing the binary does not intentionally create a new TCC principal. Ad-hoc signing is only a fallback and emits an explicit warning. Legacy Repo Harness environment/path names remain read-compatible only for migration; all new public identities and state use Forge.
+
+The LaunchAgent starts through `/usr/bin/env -i` with a minimal `HOME`, `PATH`, `LANG`, and `TMPDIR` allowlist. Controller credentials and unrelated user-session environment variables are not inherited by the desktop automation process.
+
+Desktop interaction IDs are durable provider-owned metadata. On provider restart, the store reconciles an ID to the same stable bundle/application identity and resets every process-local AX reference, snapshot revision, and visual evidence. Browser tab sessions are not stored here: Forge Browser owns browser policy and durable tab identity, while the provider exposes only the bounded internal broker primitives declared by its handshake.
 
 This state is independent from Controller releases, Git worktrees, and repository leases.
 

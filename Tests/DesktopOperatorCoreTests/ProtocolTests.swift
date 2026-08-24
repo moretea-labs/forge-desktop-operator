@@ -19,6 +19,10 @@ import Testing
     #expect(response.ok)
     #expect(response.result?["pluginId"]?.stringValue == "desktop_operator")
     #expect(response.result?["protocolVersion"]?.stringValue == "1.0")
+    #expect(response.result?["internalCapabilities"]?.arrayValue?.compactMap(\.stringValue).contains("macos_browser_automation.v1") == true)
+    #expect(response.result?["browserAutomationProtocolVersion"]?.intValue == 1)
+    #expect(response.result?["browserAutomationActions"]?.arrayValue?.compactMap(\.stringValue).contains("list_tabs") == true)
+    #expect(response.result?["browserAutomationActions"]?.arrayValue?.compactMap(\.stringValue).contains("trusted_input") == true)
 }
 
 @Test func unknownMethodIsStructuredError() {

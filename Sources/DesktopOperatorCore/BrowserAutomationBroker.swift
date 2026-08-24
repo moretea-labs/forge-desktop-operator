@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Foundation
 
 public struct BrowserAutomationCommandResult: Equatable {
@@ -13,8 +14,26 @@ public struct BrowserAutomationCommandResult: Equatable {
     }
 }
 
+public struct BrowserAutomationTrustedInputCommand: Equatable {
+    public let kind: String
+    public let x: Double?
+    public let y: Double?
+    public let fromX: Double?
+    public let fromY: Double?
+    public let toX: Double?
+    public let toY: Double?
+    public let deltaX: Double?
+    public let deltaY: Double?
+    public let button: String?
+    public let clickCount: Int?
+    public let steps: Int?
+    public let key: String?
+    public let text: String?
+}
+
 public final class BrowserAutomationBroker {
     public typealias CommandRunner = (_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult
+    public typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
 
     private struct BrowserDefinition {
         let appName: String
@@ -26,7 +45,26 @@ public final class BrowserAutomationBroker {
         let tabId: String
     }
 
-    private static let protocolVersion = 1
+    private struct ViewportGeometry {
+        let x: Double
+        let y: Double
+        let width: Double
+        let height: Double
+    }
+
+    public static let protocolVersion = 1
+    public static let supportedActions = [
+        "metadata",
+        "list_tabs",
+        "create_tab",
+        "close_tab",
+        "navigate",
+        "reload",
+        "execute_javascript",
+        "activate",
+        "trusted_input",
+        "capture_region",
+    ]
     private static let defaultTimeoutMs = 5_000
     private static let maxTimeoutMs = 30_000
     private static let maxURLBytes = 65_536
@@ -39,10 +77,12 @@ public final class BrowserAutomationBroker {
 
     private let runner: CommandRunner
     private let frontmostBundleIdentifier: () -> String?
+    private let trustedInputPerformer: TrustedInputPerformer
 
     public init() {
         self.runner = Self.runCommand
         self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+        self.trustedInputPerformer = Self.performTrustedInput
     }
 
     public init(
@@ -51,6 +91,17 @@ public final class BrowserAutomationBroker {
     ) {
         self.runner = runner
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
+        self.trustedInputPerformer = Self.performTrustedInput
+    }
+
+    public init(
+        runner: @escaping CommandRunner,
+        frontmostBundleIdentifier: @escaping () -> String?,
+        trustedInputPerformer: @escaping TrustedInputPerformer
+    ) {
+        self.runner = runner
+        self.frontmostBundleIdentifier = frontmostBundleIdentifier
+        self.trustedInputPerformer = trustedInputPerformer
     }
 
     public func execute(params: JSONValue) throws -> JSONValue {
@@ -95,9 +146,108 @@ public final class BrowserAutomationBroker {
             return try valueResult(runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs))
         case "activate":
             return try valueResult(runAppleScript(activateScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
+        case "trusted_input":
+            guard let target else { throw invalid("BROWSER_AUTOMATION_TAB_REF_REQUIRED") }
+            return try trustedInput(object["input"], browser: browser, target: target, timeoutMs: timeoutMs)
         default:
             throw invalid("BROWSER_AUTOMATION_ACTION_UNSUPPORTED")
         }
+    }
+
+    private func trustedInput(_ value: JSONValue?, browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws -> JSONValue {
+        let metadata = authoritativeMetadata(
+            try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
+            browser: browser
+        ).components(separatedBy: String(UnicodeScalar(30)!))
+        guard metadata.count >= 10,
+              metadata[0].lowercased() == "true",
+              metadata[9].lowercased() == "true" else {
+            throw PluginError(
+                code: "BROWSER_AUTOMATION_FOREGROUND_REQUIRED",
+                message: "Trusted browser input requires the exact saved tab to already be active in the frontmost browser window.",
+                retryable: true,
+                domain: "browser"
+            )
+        }
+        guard let input = value?.objectValue, let kind = input["kind"]?.stringValue else {
+            throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID")
+        }
+
+        let pointerKinds: Set<String> = ["click", "move", "wheel", "drag"]
+        let geometry = pointerKinds.contains(kind) ? try viewportGeometry(browser: browser, target: target, timeoutMs: timeoutMs) : nil
+        let button = input["button"]?.stringValue ?? "left"
+        guard ["left", "middle", "right"].contains(button) else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+
+        func finite(_ key: String, min: Double? = nil, max: Double? = nil) throws -> Double {
+            guard case .number(let number) = input[key], number.isFinite,
+                  min.map({ number >= $0 }) ?? true,
+                  max.map({ number <= $0 }) ?? true else {
+                throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID")
+            }
+            return number
+        }
+        func point(_ xKey: String, _ yKey: String) throws -> (Double, Double) {
+            guard let geometry else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            let x = try finite(xKey, min: 0, max: geometry.width)
+            let y = try finite(yKey, min: 0, max: geometry.height)
+            return (geometry.x + x, geometry.y + y)
+        }
+
+        let command: BrowserAutomationTrustedInputCommand
+        switch kind {
+        case "click":
+            let (x, y) = try point("x", "y")
+            let clickCount = input["clickCount"]?.intValue ?? 1
+            guard (1...3).contains(clickCount) else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            command = BrowserAutomationTrustedInputCommand(kind: kind, x: x, y: y, fromX: nil, fromY: nil, toX: nil, toY: nil, deltaX: nil, deltaY: nil, button: button, clickCount: clickCount, steps: nil, key: nil, text: nil)
+        case "move":
+            let (x, y) = try point("x", "y")
+            let steps = input["steps"]?.intValue ?? 1
+            guard (1...100).contains(steps) else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            command = BrowserAutomationTrustedInputCommand(kind: kind, x: x, y: y, fromX: nil, fromY: nil, toX: nil, toY: nil, deltaX: nil, deltaY: nil, button: nil, clickCount: nil, steps: steps, key: nil, text: nil)
+        case "wheel":
+            guard let geometry else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            let deltaX = try finite("deltaX", min: -100_000, max: 100_000)
+            let deltaY = try finite("deltaY", min: -100_000, max: 100_000)
+            command = BrowserAutomationTrustedInputCommand(kind: kind, x: geometry.x + geometry.width / 2, y: geometry.y + geometry.height / 2, fromX: nil, fromY: nil, toX: nil, toY: nil, deltaX: deltaX, deltaY: deltaY, button: nil, clickCount: nil, steps: nil, key: nil, text: nil)
+        case "drag":
+            let (fromX, fromY) = try point("fromX", "fromY")
+            let (toX, toY) = try point("toX", "toY")
+            let steps = input["steps"]?.intValue ?? 10
+            guard (1...100).contains(steps) else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            command = BrowserAutomationTrustedInputCommand(kind: kind, x: nil, y: nil, fromX: fromX, fromY: fromY, toX: toX, toY: toY, deltaX: nil, deltaY: nil, button: button, clickCount: nil, steps: steps, key: nil, text: nil)
+        case "key":
+            let key = try boundedString(input["key"], field: "TRUSTED_INPUT_KEY", maxBytes: 100)
+            guard !key.isEmpty else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            command = BrowserAutomationTrustedInputCommand(kind: kind, x: nil, y: nil, fromX: nil, fromY: nil, toX: nil, toY: nil, deltaX: nil, deltaY: nil, button: nil, clickCount: nil, steps: nil, key: key, text: nil)
+        case "text":
+            let text = try boundedString(input["text"], field: "TRUSTED_INPUT_TEXT", maxBytes: 40_000)
+            guard text.count <= 10_000 else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            command = BrowserAutomationTrustedInputCommand(kind: kind, x: nil, y: nil, fromX: nil, fromY: nil, toX: nil, toY: nil, deltaX: nil, deltaY: nil, button: nil, clickCount: nil, steps: nil, key: nil, text: text)
+        default:
+            throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID")
+        }
+        try trustedInputPerformer(command)
+        return .object(["performed": .bool(true)])
+    }
+
+    private func viewportGeometry(browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws -> ViewportGeometry {
+        let source = "JSON.stringify({screenX:window.screenX,screenY:window.screenY,outerWidth:window.outerWidth,outerHeight:window.outerHeight,innerWidth:window.innerWidth,innerHeight:window.innerHeight})"
+        let raw = try runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs)
+        guard let data = raw.data(using: .utf8),
+              let object = try JSONSerialization.jsonObject(with: data) as? [String: NSNumber],
+              let screenX = object["screenX"]?.doubleValue,
+              let screenY = object["screenY"]?.doubleValue,
+              let outerWidth = object["outerWidth"]?.doubleValue,
+              let outerHeight = object["outerHeight"]?.doubleValue,
+              let innerWidth = object["innerWidth"]?.doubleValue,
+              let innerHeight = object["innerHeight"]?.doubleValue,
+              innerWidth >= 1, innerHeight >= 1 else {
+            throw PluginError(code: "BROWSER_AUTOMATION_VIEWPORT_UNAVAILABLE", message: "Could not resolve browser viewport geometry for trusted input.", retryable: true, domain: "browser")
+        }
+        let sideInset = max(0, (outerWidth - innerWidth) / 2)
+        let topInset = max(0, outerHeight - innerHeight)
+        return ViewportGeometry(x: screenX + sideInset, y: screenY + topInset, width: innerWidth, height: innerHeight)
     }
 
     private func boundedTimeout(_ value: Int?) -> Int {
@@ -352,6 +502,33 @@ public final class BrowserAutomationBroker {
 
     private func failed(_ message: String) -> PluginError {
         PluginError(code: "BROWSER_AUTOMATION_ACTION_FAILED", message: String(message.prefix(2_000)), retryable: true, domain: "browser")
+    }
+
+    private static func performTrustedInput(_ command: BrowserAutomationTrustedInputCommand) throws {
+        guard AXIsProcessTrusted() else {
+            throw PluginError(
+                code: "ACCESSIBILITY_NOT_GRANTED",
+                message: "Grant Accessibility access to Forge Desktop Operator before using trusted browser input.",
+                retryable: true,
+                domain: "tcc"
+            )
+        }
+        switch command.kind {
+        case "click":
+            try InputDriver.click(x: command.x!, y: command.y!, button: command.button ?? "left", clickCount: command.clickCount ?? 1)
+        case "move":
+            try InputDriver.move(x: command.x!, y: command.y!, steps: command.steps ?? 1)
+        case "wheel":
+            try InputDriver.wheel(x: command.x!, y: command.y!, deltaX: command.deltaX!, deltaY: command.deltaY!)
+        case "drag":
+            try InputDriver.drag(fromX: command.fromX!, fromY: command.fromY!, toX: command.toX!, toY: command.toY!, button: command.button ?? "left", steps: command.steps ?? 10)
+        case "key":
+            try InputDriver.press(keys: (command.key ?? "").split(separator: "+").map(String.init))
+        case "text":
+            try InputDriver.typeUnicode(command.text ?? "", replaceExisting: false)
+        default:
+            throw PluginError.invalidArguments("Unsupported trusted input kind: \(command.kind)")
+        }
     }
 
     private static func runCommand(_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult {

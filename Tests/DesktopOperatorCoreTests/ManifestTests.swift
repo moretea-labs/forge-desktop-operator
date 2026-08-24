@@ -34,6 +34,17 @@ import Testing
     #expect(health.providerBundleIdentifier == "com.moretea.forge.desktop-operator")
     #expect(health.permissions.count == 2)
     #expect(Set(health.permissions.map(\.service)) == Set(["accessibility", "screen_recording"]))
+    #expect(health.internalCapabilities.contains("macos_browser_automation.v1"))
+    #expect(health.browserAutomationActions.contains("list_tabs"))
+}
+
+@Test func launchAgentUsesASecretFreeEnvironmentAllowlist() throws {
+    let testFile = URL(fileURLWithPath: #filePath)
+    let root = testFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let installScript = try String(contentsOf: root.appendingPathComponent("scripts/install.sh"), encoding: .utf8)
+    #expect(installScript.contains("<string>/usr/bin/env</string>"))
+    #expect(installScript.contains("<string>-i</string>"))
+    #expect(installScript.contains("PATH=/usr/bin:/bin:/usr/sbin:/sbin"))
 }
 
 @Test func screenshotFailsClosedBeforeLaunchingCaptureWithoutPermission() throws {

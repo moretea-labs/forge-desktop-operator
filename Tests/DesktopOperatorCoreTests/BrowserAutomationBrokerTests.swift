@@ -205,6 +205,77 @@ import Testing
     #expect(!script.contains("activate"))
 }
 
+@Test func browserAutomationBrokerTrustedInputFailsClosedUnlessExactTargetIsForeground() throws {
+    var performed = 0
+    var scripts: [String] = []
+    let broker = BrowserAutomationBroker(
+        runner: { _, args, _ in
+            scripts.append(args.joined(separator: "\n"))
+            return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}\u{1e}0\u{1e}0\u{1e}1000\u{1e}800\u{1e}10\u{1e}20\u{1e}true\u{1e}false")
+        },
+        frontmostBundleIdentifier: { "com.example.Other" },
+        trustedInputPerformer: { _ in performed += 1 }
+    )
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "trusted-input-background",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("trusted_input"),
+            "product": .string("chrome"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")]),
+            "input": .object(["kind": .string("key"), "key": .string("ArrowLeft")])
+        ])
+    ))
+    #expect(!response.ok)
+    #expect(response.error?.code == "BROWSER_AUTOMATION_FOREGROUND_REQUIRED")
+    #expect(performed == 0)
+    #expect(!scripts.joined(separator: "\n").contains("activate\n"))
+}
+
+@Test func browserAutomationBrokerTrustedInputTranslatesViewportCoordinatesWithoutActivation() throws {
+    var performed: BrowserAutomationTrustedInputCommand?
+    var scripts: [String] = []
+    let broker = BrowserAutomationBroker(
+        runner: { _, args, _ in
+            let script = args.joined(separator: "\n")
+            scripts.append(script)
+            if script.contains("window.screenX") {
+                return BrowserAutomationCommandResult(status: 0, stdout: "{\"screenX\":100,\"screenY\":50,\"outerWidth\":1000,\"outerHeight\":800,\"innerWidth\":980,\"innerHeight\":700}")
+            }
+            return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}\u{1e}0\u{1e}0\u{1e}1000\u{1e}800\u{1e}10\u{1e}20\u{1e}true\u{1e}false")
+        },
+        frontmostBundleIdentifier: { "com.google.Chrome" },
+        trustedInputPerformer: { performed = $0 }
+    )
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "trusted-input-click",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("trusted_input"),
+            "product": .string("chrome"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")]),
+            "input": .object([
+                "kind": .string("click"), "x": .number(20), "y": .number(30),
+                "button": .string("right"), "clickCount": .number(2)
+            ])
+        ])
+    ))
+    #expect(response.ok)
+    #expect(response.result?["performed"]?.boolValue == true)
+    #expect(performed?.kind == "click")
+    #expect(performed?.x == 130)
+    #expect(performed?.y == 180)
+    #expect(performed?.button == "right")
+    #expect(performed?.clickCount == 2)
+    #expect(!scripts.joined(separator: "\n").contains("activate\n"))
+}
+
+@Test func browserAutomationBrokerDeclaresTrustedInput() {
+    #expect(BrowserAutomationBroker.supportedActions.contains("trusted_input"))
+}
+
 @Test func liveBrowserAutomationStaysInBackgroundWhenExplicitlyEnabled() throws {
     guard ProcessInfo.processInfo.environment["FORGE_DESKTOP_LIVE_BROWSER_E2E"] == "1" else { return }
     let broker = BrowserAutomationBroker()

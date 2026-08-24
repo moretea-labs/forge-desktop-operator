@@ -89,6 +89,12 @@ cat >"$PLIST" <<PLIST
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/usr/bin/env</string>
+    <string>-i</string>
+    <string>HOME=$HOME</string>
+    <string>PATH=/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <string>LANG=en_US.UTF-8</string>
+    <string>TMPDIR=/tmp</string>
     <string>$APP_EXECUTABLE</string>
     <string>serve</string>
     <string>--socket</string>

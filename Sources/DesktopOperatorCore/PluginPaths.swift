@@ -22,6 +22,7 @@ public enum PluginPaths {
     public static var artifactDirectory: String { URL(fileURLWithPath: root).appendingPathComponent("artifacts").path }
     public static var logDirectory: String { URL(fileURLWithPath: root).appendingPathComponent("logs").path }
     public static var registrationDirectory: String { URL(fileURLWithPath: root).appendingPathComponent("registration").path }
+    public static var sessionStorePath: String { URL(fileURLWithPath: root).appendingPathComponent("desktop-sessions.json").path }
     public static var defaultSocketPath: String { URL(fileURLWithPath: runDirectory).appendingPathComponent("desktop-operator.sock").path }
 
     public static func ensureRuntimeDirectories() throws {
