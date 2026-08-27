@@ -69,6 +69,76 @@ import Testing
     #expect(response.result?["value"]?.stringValue?.hasPrefix("true\u{1e}https://example.com") == true)
 }
 
+@Test func browserAutomationBrokerListsTabsThroughDeclaredBrokerAction() throws {
+    var script = ""
+    let inventory = "false\u{1e}10\u{1f}20\u{1f}true\u{1f}https://example.com\u{1f}Example"
+    let broker = BrowserAutomationBroker { _, args, _ in
+        script = args.joined(separator: "\n")
+        return BrowserAutomationCommandResult(status: 0, stdout: inventory)
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "list-tabs",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("list_tabs"),
+            "product": .string("chrome")
+        ])
+    ))
+    #expect(response.ok)
+    #expect(response.result?["value"]?.stringValue == inventory)
+    #expect(script.contains("repeat with candidateWindow in windows"))
+    #expect(script.contains("id of candidateTab"))
+}
+
+@Test func browserAutomationBrokerTrustedInputRequiresExactForegroundTarget() throws {
+    var performedKind: String?
+    let metadata = "false\u{1e}https://example.com\u{1e}\u{1e}0\u{1e}0\u{1e}800\u{1e}600\u{1e}\u{1e}\u{1e}true\u{1e}false"
+    let broker = BrowserAutomationBroker(
+        runner: { _, _, _ in BrowserAutomationCommandResult(status: 0, stdout: metadata) },
+        frontmostBundleIdentifier: { "com.google.Chrome" },
+        trustedInputRunner: { input in performedKind = input["kind"]?.stringValue }
+    )
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "trusted-input",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("trusted_input"),
+            "product": .string("chrome"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")]),
+            "input": .object(["kind": .string("key"), "key": .string("return")])
+        ])
+    ))
+    #expect(response.ok)
+    #expect(response.result?["performed"]?.boolValue == true)
+    #expect(performedKind == "key")
+}
+
+@Test func browserAutomationBrokerTrustedInputRejectsBackgroundTargetBeforeInput() throws {
+    var performed = false
+    let metadata = "false\u{1e}https://example.com\u{1e}\u{1e}0\u{1e}0\u{1e}800\u{1e}600\u{1e}\u{1e}\u{1e}false\u{1e}false"
+    let broker = BrowserAutomationBroker(
+        runner: { _, _, _ in BrowserAutomationCommandResult(status: 0, stdout: metadata) },
+        frontmostBundleIdentifier: { "com.google.Chrome" },
+        trustedInputRunner: { _ in performed = true }
+    )
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "trusted-input-background",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("trusted_input"),
+            "product": .string("chrome"),
+            "ref": .object(["windowId": .string("10"), "tabId": .string("20")]),
+            "input": .object(["kind": .string("text"), "text": .string("unsafe")])
+        ])
+    ))
+    #expect(!response.ok)
+    #expect(response.error?.code == "BROWSER_AUTOMATION_TRUSTED_INPUT_TARGET_NOT_FOREGROUND")
+    #expect(!performed)
+}
+
 @Test func browserAutomationBrokerIsInternalNotPublicPluginAction() throws {
     #expect(!PluginManifest.current.actions.contains("macos_browser_automation"))
     let runtime = PluginRuntime()

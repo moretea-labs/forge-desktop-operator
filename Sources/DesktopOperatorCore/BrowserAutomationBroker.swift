@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import Foundation
 
 public struct BrowserAutomationCommandResult: Equatable {
@@ -15,6 +16,7 @@ public struct BrowserAutomationCommandResult: Equatable {
 
 public final class BrowserAutomationBroker {
     public typealias CommandRunner = (_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult
+    public typealias TrustedInputRunner = (_ input: JSONValue) throws -> Void
 
     private struct BrowserDefinition {
         let appName: String
@@ -39,10 +41,12 @@ public final class BrowserAutomationBroker {
 
     private let runner: CommandRunner
     private let frontmostBundleIdentifier: () -> String?
+    private let trustedInputRunner: TrustedInputRunner
 
     public init() {
         self.runner = Self.runCommand
         self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+        self.trustedInputRunner = Self.performTrustedInput
     }
 
     public init(
@@ -51,6 +55,17 @@ public final class BrowserAutomationBroker {
     ) {
         self.runner = runner
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
+        self.trustedInputRunner = Self.performTrustedInput
+    }
+
+    public init(
+        runner: @escaping CommandRunner,
+        frontmostBundleIdentifier: @escaping () -> String?,
+        trustedInputRunner: @escaping TrustedInputRunner
+    ) {
+        self.runner = runner
+        self.frontmostBundleIdentifier = frontmostBundleIdentifier
+        self.trustedInputRunner = trustedInputRunner
     }
 
     public func execute(params: JSONValue) throws -> JSONValue {
@@ -76,6 +91,8 @@ public final class BrowserAutomationBroker {
                 try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
                 browser: browser
             ))
+        case "list_tabs":
+            return try valueResult(runAppleScript(listTabsScript(browser.appName), args: [], timeoutMs: timeoutMs))
         case "create_tab":
             let url = try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes)
             return try valueResult(runAppleScript(createTabScript(browser.appName), args: [url], timeoutMs: timeoutMs))
@@ -100,6 +117,12 @@ public final class BrowserAutomationBroker {
             return try valueResult(runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs))
         case "activate":
             return try valueResult(runAppleScript(activateScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
+        case "trusted_input":
+            guard let target else { throw invalid("BROWSER_AUTOMATION_TAB_REF_REQUIRED") }
+            try assertTrustedInputTarget(browser: browser, target: target, timeoutMs: timeoutMs)
+            guard let input = object["input"] else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
+            try trustedInputRunner(input)
+            return .object(["performed": .bool(true)])
         default:
             throw invalid("BROWSER_AUTOMATION_ACTION_UNSUPPORTED")
         }
@@ -131,6 +154,126 @@ public final class BrowserAutomationBroker {
 
     private func valueResult(_ value: String) -> JSONValue {
         .object(["value": .string(value)])
+    }
+
+    private func assertTrustedInputTarget(browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws {
+        let metadata = authoritativeMetadata(
+            try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
+            browser: browser
+        )
+        let parts = metadata.components(separatedBy: String(UnicodeScalar(30)!))
+        guard parts.count > 9,
+              parts[0].lowercased() == "true",
+              parts[9].lowercased() == "true" else {
+            throw PluginError(
+                code: "BROWSER_AUTOMATION_TRUSTED_INPUT_TARGET_NOT_FOREGROUND",
+                message: "Trusted input requires the exact saved browser tab to be active in the frontmost browser window.",
+                retryable: true,
+                domain: "browser"
+            )
+        }
+    }
+
+    private static func number(_ object: [String: JSONValue], _ key: String) throws -> Double {
+        guard let value = object[key], case .number(let number) = value, number.isFinite else {
+            throw PluginError.invalidArguments("Invalid trusted input field: \(key)")
+        }
+        return number
+    }
+
+    private static func mouseButton(_ value: String) throws -> (CGMouseButton, CGEventType, CGEventType, CGEventType) {
+        switch value {
+        case "left": return (.left, .leftMouseDown, .leftMouseUp, .leftMouseDragged)
+        case "right": return (.right, .rightMouseDown, .rightMouseUp, .rightMouseDragged)
+        case "middle": return (.center, .otherMouseDown, .otherMouseUp, .otherMouseDragged)
+        default: throw PluginError.invalidArguments("Unsupported trusted input mouse button: \(value)")
+        }
+    }
+
+    private static func performTrustedInput(_ value: JSONValue) throws {
+        guard let object = value.objectValue, let kind = object["kind"]?.stringValue else {
+            throw PluginError.invalidArguments("Invalid browser trusted input payload")
+        }
+        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+            throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser trusted input source", retryable: true, domain: "input")
+        }
+        func postMove(_ point: CGPoint) throws {
+            guard let event = CGEvent(mouseEventSource: source, mouseType: .mouseMoved, mouseCursorPosition: point, mouseButton: .left) else {
+                throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser mouse move", retryable: true, domain: "input")
+            }
+            event.post(tap: .cghidEventTap)
+        }
+        switch kind {
+        case "click":
+            let point = CGPoint(x: try number(object, "x"), y: try number(object, "y"))
+            let buttonName = object["button"]?.stringValue ?? "left"
+            let (button, downType, upType, _) = try mouseButton(buttonName)
+            let count = object["clickCount"]?.intValue ?? 1
+            guard (1...3).contains(count) else { throw PluginError.invalidArguments("Invalid browser clickCount") }
+            try postMove(point)
+            for index in 1...count {
+                guard let down = CGEvent(mouseEventSource: source, mouseType: downType, mouseCursorPosition: point, mouseButton: button),
+                      let up = CGEvent(mouseEventSource: source, mouseType: upType, mouseCursorPosition: point, mouseButton: button) else {
+                    throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser click", retryable: true, domain: "input")
+                }
+                down.setIntegerValueField(.mouseEventClickState, value: Int64(index))
+                up.setIntegerValueField(.mouseEventClickState, value: Int64(index))
+                down.post(tap: .cghidEventTap)
+                up.post(tap: .cghidEventTap)
+            }
+        case "move":
+            let destination = CGPoint(x: try number(object, "x"), y: try number(object, "y"))
+            let steps = object["steps"]?.intValue ?? 1
+            guard (1...100).contains(steps) else { throw PluginError.invalidArguments("Invalid browser move steps") }
+            let start = CGEvent(source: source)?.location ?? destination
+            for index in 1...steps {
+                let fraction = CGFloat(index) / CGFloat(steps)
+                try postMove(CGPoint(x: start.x + (destination.x - start.x) * fraction, y: start.y + (destination.y - start.y) * fraction))
+            }
+        case "wheel":
+            let deltaX = Int32(clamping: Int(try number(object, "deltaX").rounded()))
+            let deltaY = Int32(clamping: Int(try number(object, "deltaY").rounded()))
+            guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel, wheelCount: 2, wheel1: deltaY, wheel2: deltaX, wheel3: 0) else {
+                throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser wheel input", retryable: true, domain: "input")
+            }
+            event.post(tap: .cghidEventTap)
+        case "drag":
+            let start = CGPoint(x: try number(object, "fromX"), y: try number(object, "fromY"))
+            let end = CGPoint(x: try number(object, "toX"), y: try number(object, "toY"))
+            let steps = object["steps"]?.intValue ?? 1
+            guard (1...100).contains(steps) else { throw PluginError.invalidArguments("Invalid browser drag steps") }
+            let buttonName = object["button"]?.stringValue ?? "left"
+            let (button, downType, upType, dragType) = try mouseButton(buttonName)
+            try postMove(start)
+            guard let down = CGEvent(mouseEventSource: source, mouseType: downType, mouseCursorPosition: start, mouseButton: button) else {
+                throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser drag start", retryable: true, domain: "input")
+            }
+            down.post(tap: .cghidEventTap)
+            for index in 1...steps {
+                let fraction = CGFloat(index) / CGFloat(steps)
+                let point = CGPoint(x: start.x + (end.x - start.x) * fraction, y: start.y + (end.y - start.y) * fraction)
+                guard let drag = CGEvent(mouseEventSource: source, mouseType: dragType, mouseCursorPosition: point, mouseButton: button) else {
+                    throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser drag movement", retryable: true, domain: "input")
+                }
+                drag.post(tap: .cghidEventTap)
+            }
+            guard let up = CGEvent(mouseEventSource: source, mouseType: upType, mouseCursorPosition: end, mouseButton: button) else {
+                throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create browser drag end", retryable: true, domain: "input")
+            }
+            up.post(tap: .cghidEventTap)
+        case "key":
+            guard let key = object["key"]?.stringValue, !key.isEmpty, key.count <= 64 else {
+                throw PluginError.invalidArguments("Invalid browser trusted key")
+            }
+            try InputDriver.press(keys: [key])
+        case "text":
+            guard let text = object["text"]?.stringValue, text.utf8.count <= 65_536 else {
+                throw PluginError.invalidArguments("Invalid browser trusted text")
+            }
+            try InputDriver.typeUnicode(text, replaceExisting: false)
+        default:
+            throw PluginError.invalidArguments("Unsupported browser trusted input kind: \(kind)")
+        }
     }
 
     private func authoritativeMetadata(_ value: String, browser: BrowserDefinition) -> String {
@@ -182,6 +325,58 @@ public final class BrowserAutomationBroker {
         let bytes = try Data(contentsOf: path)
         guard bytes.count <= Self.maxCaptureBytes else { throw invalid("BROWSER_AUTOMATION_CAPTURE_TOO_LARGE") }
         return bytes.base64EncodedString()
+    }
+
+    private func listTabsScript(_ appName: String) -> String {
+        """
+        on replaceText(sourceText, needle, replacement)
+          set previousDelimiters to AppleScript's text item delimiters
+          set AppleScript's text item delimiters to needle
+          set sourceItems to every text item of sourceText
+          set AppleScript's text item delimiters to replacement
+          set resultText to sourceItems as text
+          set AppleScript's text item delimiters to previousDelimiters
+          return resultText
+        end replaceText
+
+        on cleanField(sourceText, recordSeparator, fieldSeparator)
+          set cleaned to my replaceText(sourceText as text, recordSeparator, " ")
+          return my replaceText(cleaned, fieldSeparator, " ")
+        end cleanField
+
+        \(tell(appName, """
+        set recordSeparator to ASCII character 30
+        set fieldSeparator to ASCII character 31
+        set maxTabs to 256
+        set returnedCount to 0
+        set truncatedInventory to false
+        set outputText to "false"
+        repeat with candidateWindow in windows
+          set activeTabId to ""
+          try
+            set activeTabId to ((id of active tab of candidateWindow) as text)
+          end try
+          repeat with candidateTab in tabs of candidateWindow
+            if returnedCount is greater than or equal to maxTabs then
+              set truncatedInventory to true
+              exit repeat
+            end if
+            set candidateWindowId to ((id of candidateWindow) as text)
+            set candidateTabId to ((id of candidateTab) as text)
+            set candidateURL to my cleanField((URL of candidateTab as text), recordSeparator, fieldSeparator)
+            set candidateTitle to my cleanField((title of candidateTab as text), recordSeparator, fieldSeparator)
+            set candidateActive to (candidateTabId is activeTabId)
+            set outputText to outputText & recordSeparator & candidateWindowId & fieldSeparator & candidateTabId & fieldSeparator & (candidateActive as text) & fieldSeparator & candidateURL & fieldSeparator & candidateTitle
+            set returnedCount to returnedCount + 1
+          end repeat
+          if truncatedInventory then exit repeat
+        end repeat
+        if truncatedInventory then
+          set outputText to "true" & text 6 thru -1 of outputText
+        end if
+        return outputText
+        """))
+        """
     }
 
     private func metadataScript(_ appName: String, _ target: TabRef?) -> String {
