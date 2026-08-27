@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Darwin
 import Foundation
@@ -105,19 +106,145 @@ public enum ApplicationDriver {
         throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
     }
 
-    public static func activate(_ application: NSRunningApplication, timeoutSeconds: TimeInterval = 2) throws {
+    private static func waitForSystemFrontmost(pid: Int32, timeoutSeconds: TimeInterval) -> Bool {
+        if isActive(pid: pid) { return true }
+        let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
+        while Date() < deadline {
+            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+            if isActive(pid: pid) { return true }
+        }
+        return isActive(pid: pid)
+    }
+
+    private static func requestWorkspaceActivation(_ application: NSRunningApplication) -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        if let bundleIdentifier = application.bundleIdentifier, !bundleIdentifier.isEmpty {
+            process.arguments = ["-b", bundleIdentifier]
+        } else if let appName = application.localizedName, !appName.isEmpty {
+            process.arguments = ["-a", appName]
+        } else {
+            return false
+        }
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return false
+        }
+        return process.terminationStatus == 0
+    }
+
+    private static func requestAccessibilityForeground(pid: Int32) -> AXError {
+        let applicationElement = AXUIElementCreateApplication(pid)
+        var bestResult = AXUIElementSetAttributeValue(
+            applicationElement,
+            kAXFrontmostAttribute as CFString,
+            kCFBooleanTrue
+        )
+
+        var windowValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(applicationElement, kAXFocusedWindowAttribute as CFString, &windowValue) != .success
+            || windowValue == nil {
+            windowValue = nil
+            _ = AXUIElementCopyAttributeValue(applicationElement, kAXMainWindowAttribute as CFString, &windowValue)
+        }
+        if windowValue == nil {
+            var windowsValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(applicationElement, kAXWindowsAttribute as CFString, &windowsValue) == .success,
+               let windows = windowsValue as? [AXUIElement],
+               let firstWindow = windows.first {
+                windowValue = firstWindow
+            }
+        }
+
+        if let windowValue {
+            let window = windowValue as! AXUIElement
+            let focusedWindowResult = AXUIElementSetAttributeValue(
+                applicationElement,
+                kAXFocusedWindowAttribute as CFString,
+                window
+            )
+            if bestResult != .success, focusedWindowResult == .success { bestResult = .success }
+
+            let mainResult = AXUIElementSetAttributeValue(window, kAXMainAttribute as CFString, kCFBooleanTrue)
+            if bestResult != .success, mainResult == .success { bestResult = .success }
+
+            let focusedResult = AXUIElementSetAttributeValue(window, kAXFocusedAttribute as CFString, kCFBooleanTrue)
+            if bestResult != .success, focusedResult == .success { bestResult = .success }
+
+            let raiseResult = AXUIElementPerformAction(window, kAXRaiseAction as CFString)
+            if bestResult != .success, raiseResult == .success { bestResult = .success }
+        }
+        return bestResult
+    }
+
+    static func establishForegroundAuthority(
+        pid: Int32,
+        timeoutSeconds: TimeInterval,
+        appKitActivate: () -> Bool,
+        workspaceActivate: () -> Bool,
+        accessibilityTrusted: () -> Bool,
+        accessibilityActivate: () -> AXError,
+        waitForFrontmost: (TimeInterval) -> Bool
+    ) throws {
+        if waitForFrontmost(0) { return }
+
+        let appKitAccepted = appKitActivate()
+        let appKitBudget = min(max(timeoutSeconds * 0.2, 0.1), 0.4)
+        if waitForFrontmost(appKitBudget) { return }
+
+        let workspaceRequested = workspaceActivate()
+        let workspaceBudget = min(max(timeoutSeconds * 0.5, 0.25), 1.0)
+        if workspaceRequested && waitForFrontmost(workspaceBudget) { return }
+
+        var accessibilityResult: AXError?
+        if accessibilityTrusted() {
+            accessibilityResult = accessibilityActivate()
+            if accessibilityResult == .success,
+               waitForFrontmost(max(0, timeoutSeconds - appKitBudget - workspaceBudget)) {
+                return
+            }
+        }
+
+        if !appKitAccepted && !workspaceRequested && accessibilityResult != .success {
+            throw PluginError(
+                code: "APP_ACTIVATION_FAILED",
+                message: accessibilityResult == nil
+                    ? "macOS refused explicit application activation and no trusted foreground fallback was available"
+                    : "macOS refused explicit application activation and Accessibility foreground fallback failed with code \(accessibilityResult!.rawValue)",
+                retryable: true,
+                domain: "application"
+            )
+        }
+        throw PluginError(
+            code: "APP_ACTIVATION_TIMEOUT",
+            message: accessibilityResult == nil
+                ? "Target application did not become system foreground after AppKit and Workspace activation requests"
+                : "Target application did not become system foreground after AppKit, Workspace, and Accessibility activation requests",
+            retryable: true,
+            domain: "application"
+        )
+    }
+
+    public static func activate(_ application: NSRunningApplication, timeoutSeconds: TimeInterval = 5) throws {
         guard !application.isTerminated, processIsAlive(application.processIdentifier) else {
             throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application is no longer running", retryable: true, domain: "application")
         }
-        guard application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps]) else {
-            throw PluginError(code: "APP_ACTIVATION_FAILED", message: "macOS refused explicit application activation", retryable: true, domain: "application")
-        }
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if application.isActive { return }
-            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
-        }
-        throw PluginError(code: "APP_ACTIVATION_TIMEOUT", message: "Target application did not become foreground after explicit activation", retryable: true, domain: "application")
+        let pid = application.processIdentifier
+        try establishForegroundAuthority(
+            pid: pid,
+            timeoutSeconds: timeoutSeconds,
+            appKitActivate: {
+                application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            },
+            workspaceActivate: { requestWorkspaceActivation(application) },
+            accessibilityTrusted: { AXIsProcessTrusted() },
+            accessibilityActivate: { requestAccessibilityForeground(pid: pid) },
+            waitForFrontmost: { waitForSystemFrontmost(pid: pid, timeoutSeconds: $0) }
+        )
     }
 
     public static func ensureRunning(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> NSRunningApplication {
@@ -174,12 +301,46 @@ public enum ApplicationDriver {
         throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
     }
 
+    static func parseLaunchServicesFrontmostPID(_ output: String) -> Int32? {
+        guard let marker = output.range(of: "pid =") else { return nil }
+        let suffix = output[marker.upperBound...]
+        guard let token = suffix.split(whereSeparator: { $0.isWhitespace }).first else { return nil }
+        return Int32(token)
+    }
+
+    private static func runLaunchServicesInfo(_ arguments: [String]) -> String? {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/lsappinfo")
+        process.arguments = arguments
+        let outputPipe = Pipe()
+        let errorPipe = Pipe()
+        process.standardOutput = outputPipe
+        process.standardError = errorPipe
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            return nil
+        }
+        guard process.terminationStatus == 0 else { return nil }
+        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func launchServicesFrontmostPID() -> Int32? {
+        guard let front = runLaunchServicesInfo(["front"])?.trimmingCharacters(in: .whitespacesAndNewlines),
+              front.hasPrefix("ASN:"),
+              let info = runLaunchServicesInfo(["info", "-only", "pid", front])
+        else { return nil }
+        return parseLaunchServicesFrontmostPID(info)
+    }
+
     static func foregroundMatches(pid: Int32, frontmostPID: Int32?) -> Bool {
         frontmostPID == pid
     }
 
     public static func isActive(pid: Int32) -> Bool {
-        foregroundMatches(pid: pid, frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        foregroundMatches(pid: pid, frontmostPID: launchServicesFrontmostPID())
     }
 
     public static func openURL(_ value: String) throws {
@@ -232,7 +393,7 @@ public enum ApplicationDriver {
     }
 
     public static func runningApplicationSummaries(limit: Int = 100) -> [JSONValue] {
-        let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let frontmostPID = launchServicesFrontmostPID()
         return NSWorkspace.shared.runningApplications.prefix(max(1, min(limit, 500))).map { app in
             .object([
                 "pid": .number(Double(app.processIdentifier)),

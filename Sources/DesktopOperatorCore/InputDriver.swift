@@ -20,7 +20,7 @@ public enum InputDriver {
         let target = CGPoint(x: x, y: y)
         let start = CGEvent(source: nil)?.location ?? target
         let count = max(1, min(steps, 100))
-        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create mouse event source", retryable: true, domain: "input")
         }
         for index in 1...count {
@@ -37,7 +37,7 @@ public enum InputDriver {
         let (mouseButton, downType, upType, _) = try mouseTypes(button)
         let point = CGPoint(x: x, y: y)
         try move(x: x, y: y)
-        guard let source = CGEventSource(stateID: .combinedSessionState) else {
+        guard let source = CGEventSource(stateID: .hidSystemState) else {
             throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create mouse event source", retryable: true, domain: "input")
         }
         for index in 1...max(1, min(clickCount, 3)) {
@@ -64,7 +64,7 @@ public enum InputDriver {
     public static func drag(fromX: Double, fromY: Double, toX: Double, toY: Double, button: String, steps: Int) throws {
         let (mouseButton, downType, upType, dragType) = try mouseTypes(button)
         try move(x: fromX, y: fromY)
-        guard let source = CGEventSource(stateID: .combinedSessionState),
+        guard let source = CGEventSource(stateID: .hidSystemState),
               let down = CGEvent(mouseEventSource: source, mouseType: downType, mouseCursorPosition: CGPoint(x: fromX, y: fromY), mouseButton: mouseButton) else {
             throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create drag events", retryable: true, domain: "input")
         }
@@ -113,8 +113,9 @@ public enum InputDriver {
         if normalized.contains(where: { ["option", "alt"].contains($0) }) { flags.insert(.maskAlternate) }
         if normalized.contains(where: { ["control", "ctrl"].contains($0) }) { flags.insert(.maskControl) }
 
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
             throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create keyboard events", retryable: true, domain: "input")
         }
         down.flags = flags
@@ -128,8 +129,9 @@ public enum InputDriver {
             try press(keys: ["cmd", "a"])
         }
         let units = Array(text.utf16)
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: false) else {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
             throw PluginError(code: "INPUT_EVENT_CREATE_FAILED", message: "Could not create Unicode keyboard events", retryable: true, domain: "input")
         }
         units.withUnsafeBufferPointer { buffer in

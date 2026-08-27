@@ -90,10 +90,107 @@ import Testing
     #expect(!ApplicationDriver.processIsAlive(Int32.max))
 }
 
+@Test func launchServicesFrontmostPIDParsingIsExactAndFailClosed() {
+    #expect(ApplicationDriver.parseLaunchServicesFrontmostPID("pid = 25268 !cgsConnection") == 25268)
+    #expect(ApplicationDriver.parseLaunchServicesFrontmostPID("pid = nope") == nil)
+    #expect(ApplicationDriver.parseLaunchServicesFrontmostPID("bundleID=\"com.google.Chrome\"") == nil)
+}
+
 @Test func foregroundIdentityUsesOneAuthoritativeFrontmostPID() {
     #expect(ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: 42))
     #expect(!ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: 43))
     #expect(!ApplicationDriver.foregroundMatches(pid: 42, frontmostPID: nil))
+}
+
+@Test func applicationActivationUsesWorkspaceBeforeAccessibilityWhenAppKitDoesNotEstablishForeground() throws {
+    var appKitCalls = 0
+    var workspaceCalls = 0
+    var accessibilityCalls = 0
+    var waitCalls = 0
+    try ApplicationDriver.establishForegroundAuthority(
+        pid: 42,
+        timeoutSeconds: 2,
+        appKitActivate: {
+            appKitCalls += 1
+            return true
+        },
+        workspaceActivate: {
+            workspaceCalls += 1
+            return true
+        },
+        accessibilityTrusted: { true },
+        accessibilityActivate: {
+            accessibilityCalls += 1
+            return .success
+        },
+        waitForFrontmost: { _ in
+            waitCalls += 1
+            return waitCalls >= 3
+        }
+    )
+    #expect(appKitCalls == 1)
+    #expect(workspaceCalls == 1)
+    #expect(accessibilityCalls == 0)
+    #expect(waitCalls == 3)
+}
+
+@Test func applicationActivationFallsBackToAccessibilityWhenWorkspaceStillDoesNotEstablishForeground() throws {
+    var workspaceCalls = 0
+    var accessibilityCalls = 0
+    var waitCalls = 0
+    try ApplicationDriver.establishForegroundAuthority(
+        pid: 42,
+        timeoutSeconds: 2,
+        appKitActivate: { true },
+        workspaceActivate: {
+            workspaceCalls += 1
+            return true
+        },
+        accessibilityTrusted: { true },
+        accessibilityActivate: {
+            accessibilityCalls += 1
+            return .success
+        },
+        waitForFrontmost: { _ in
+            waitCalls += 1
+            return waitCalls >= 4
+        }
+    )
+    #expect(workspaceCalls == 1)
+    #expect(accessibilityCalls == 1)
+    #expect(waitCalls == 4)
+}
+
+@Test func applicationActivationDoesNotUseFallbacksWhenAppKitEstablishesForeground() throws {
+    var appKitCalls = 0
+    var workspaceCalls = 0
+    var accessibilityCalls = 0
+    var waitCalls = 0
+    try ApplicationDriver.establishForegroundAuthority(
+        pid: 42,
+        timeoutSeconds: 2,
+        appKitActivate: {
+            appKitCalls += 1
+            return true
+        },
+        workspaceActivate: {
+            workspaceCalls += 1
+            return true
+        },
+        accessibilityTrusted: { true },
+        accessibilityActivate: {
+            accessibilityCalls += 1
+            return .success
+        },
+        waitForFrontmost: { _ in
+            waitCalls += 1
+            return waitCalls >= 2
+        }
+    )
+    #expect(appKitCalls == 1)
+    #expect(workspaceCalls == 0)
+    #expect(accessibilityCalls == 0)
+    #expect(waitCalls == 2)
 }
 
 
