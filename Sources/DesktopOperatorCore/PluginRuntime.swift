@@ -343,6 +343,10 @@ public final class PluginRuntime {
             return try execute(action: params.action, arguments: params.arguments)
         case "macos_browser_automation":
             guard let paramsValue = request.params else { throw PluginError.invalidArguments("macos_browser_automation requires params") }
+            let action = paramsValue["action"]?.stringValue
+            if action == "metadata" || action == "list_tabs" || action == "capture_region" {
+                return try browserAutomation.execute(params: paramsValue)
+            }
             return try withBrowserLock { try browserAutomation.execute(params: paramsValue) }
         case "shutdown":
             shutdownRequested = true
@@ -359,8 +363,10 @@ public final class PluginRuntime {
         return try body()
     }
 
-    private func withBrowserLock<T>(_ body: () throws -> T) rethrows -> T {
-        browserLock.lock()
+    private func withBrowserLock<T>(_ body: () throws -> T) throws -> T {
+        guard browserLock.try() else {
+            throw PluginError(code: "BROWSER_AUTOMATION_SERIALIZATION_BUSY", message: "Another browser mutation is still in progress; retry instead of waiting inside the Unix-socket request.", retryable: true, domain: "browser")
+        }
         defer { browserLock.unlock() }
         return try body()
     }

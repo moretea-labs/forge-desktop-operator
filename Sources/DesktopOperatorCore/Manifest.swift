@@ -20,7 +20,7 @@ public struct PluginManifest: Codable, Equatable, Sendable {
     public static let current = PluginManifest(
         id: "desktop_operator",
         name: "Forge Desktop Operator",
-        version: "0.2.1",
+        version: "0.2.2",
         protocolVersion: "1.0",
         mode: "external",
         scope: "controller",

@@ -132,7 +132,8 @@ public final class BrowserAutomationBroker {
             return valueResult(try runAppleScript(listTabsScript(browser.appName), args: [], timeoutMs: timeoutMs))
         case "create_tab":
             let url = try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes)
-            return try valueResult(runAppleScript(createTabScript(browser.appName), args: [url], timeoutMs: timeoutMs))
+            let output = try runAppleScript(createTabScript(browser.appName), args: [url], timeoutMs: timeoutMs)
+            return try createTabResult(output, requestedURL: url)
         case "close_tab":
             guard let target else { throw invalid("BROWSER_AUTOMATION_TAB_REF_REQUIRED") }
             return try valueResult(runAppleScript(closeTabScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
@@ -278,6 +279,26 @@ public final class BrowserAutomationBroker {
         .object(["value": .string(value)])
     }
 
+    private func createTabResult(_ value: String, requestedURL: String) throws -> JSONValue {
+        let separator = String(UnicodeScalar(30)!)
+        let parts = value.components(separatedBy: separator)
+        guard parts.count == 4, !parts[0].isEmpty, !parts[1].isEmpty, parts[2] == requestedURL else {
+            throw PluginError(code: "BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", message: "create_tab did not return stable identity and exact requested-URL assignment proof", retryable: true, domain: "browser")
+        }
+        let legacyValue = [parts[0], parts[1]].joined(separator: separator)
+        return .object([
+            "value": .string(legacyValue),
+            "ref": .object(["windowId": .string(parts[0]), "tabId": .string(parts[1])]),
+            "navigation": .object([
+                "provenanceVersion": .number(1),
+                "requestedUrl": .string(requestedURL),
+                "assignmentAccepted": .bool(true),
+                "acceptedBy": .string("chrome_applescript_url_set"),
+                "observedUrlAfterAssignment": .string(parts[3]),
+            ]),
+        ])
+    }
+
     private func authoritativeMetadata(_ value: String, browser: BrowserDefinition) -> String {
         let separator = String(UnicodeScalar(30)!)
         var parts = value.components(separatedBy: separator)
@@ -408,12 +429,24 @@ public final class BrowserAutomationBroker {
         \(tell(appName, """
         if (count of windows) is 0 then error "FORGE_NO_BROWSER_WINDOW"
         set targetWindow to front window
-        set originalActiveIndex to active tab index of targetWindow
-        set targetTab to make new tab at end of tabs of targetWindow with properties {URL:targetUrl}
+        set originalActiveTabId to ((id of active tab of targetWindow) as text)
+        set targetTab to make new tab at end of tabs of targetWindow
         set targetTabId to id of targetTab
-        set active tab index of targetWindow to originalActiveIndex
+        set URL of targetTab to targetUrl
+        set observedUrlAfterAssignment to (URL of targetTab as text)
+        set activeTabIdAfterCreate to ((id of active tab of targetWindow) as text)
+        if activeTabIdAfterCreate is (targetTabId as text) then
+          set candidateIndex to 1
+          repeat with candidateTab in tabs of targetWindow
+            if ((id of candidateTab) as text) is originalActiveTabId then
+              set active tab index of targetWindow to candidateIndex
+              exit repeat
+            end if
+            set candidateIndex to candidateIndex + 1
+          end repeat
+        end if
         set separator to ASCII character 30
-        return ((id of targetWindow) as text) & separator & (targetTabId as text)
+        return ((id of targetWindow) as text) & separator & (targetTabId as text) & separator & targetUrl & separator & observedUrlAfterAssignment
         """))
         end run
         """

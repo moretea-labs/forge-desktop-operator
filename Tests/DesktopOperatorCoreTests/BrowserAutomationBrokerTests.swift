@@ -183,11 +183,14 @@ import Testing
     #expect(calls == 0)
 }
 
-@Test func browserAutomationBrokerCreatesBackgroundTabWithoutActivatingIt() throws {
+@Test func browserAutomationBrokerCreatesBackgroundTabWithStableAssignmentProvenance() throws {
     var script = ""
+    let separator = String(UnicodeScalar(30)!)
+    let requestedURL = "https://example.com/requested"
+    let observedURL = "https://example.com/canonical"
     let broker = BrowserAutomationBroker { _, args, _ in
         script = args.joined(separator: "\n")
-        return BrowserAutomationCommandResult(status: 0, stdout: "10\u{1e}20")
+        return BrowserAutomationCommandResult(status: 0, stdout: ["10", "20", requestedURL, observedURL].joined(separator: separator))
     }
     let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
         id: "background-tab",
@@ -196,13 +199,40 @@ import Testing
             "protocolVersion": .number(1),
             "action": .string("create_tab"),
             "product": .string("chrome"),
-            "url": .string("https://example.com")
+            "url": .string(requestedURL)
         ])
     ))
     #expect(response.ok)
-    #expect(script.contains("set originalActiveIndex to active tab index of targetWindow"))
-    #expect(script.contains("set active tab index of targetWindow to originalActiveIndex"))
-    #expect(!script.contains("activate"))
+    #expect(response.result?["value"]?.stringValue == ["10", "20"].joined(separator: separator))
+    #expect(response.result?["ref"]?["windowId"]?.stringValue == "10")
+    #expect(response.result?["ref"]?["tabId"]?.stringValue == "20")
+    #expect(response.result?["navigation"]?["requestedUrl"]?.stringValue == requestedURL)
+    #expect(response.result?["navigation"]?["assignmentAccepted"]?.boolValue == true)
+    #expect(response.result?["navigation"]?["observedUrlAfterAssignment"]?.stringValue == observedURL)
+    #expect(script.contains("set originalActiveTabId to ((id of active tab of targetWindow) as text)"))
+    #expect(script.contains("set URL of targetTab to targetUrl"))
+    #expect(script.contains("if activeTabIdAfterCreate is (targetTabId as text) then"))
+    #expect(script.contains("if ((id of candidateTab) as text) is originalActiveTabId then"))
+    #expect(!script.contains("originalActiveIndex"))
+    #expect(!script.contains("activate\n"))
+}
+
+@Test func browserAutomationBrokerRejectsCreateTabWithoutExactAssignmentProof() throws {
+    let broker = BrowserAutomationBroker { _, _, _ in
+        BrowserAutomationCommandResult(status: 0, stdout: "10\u{1e}20")
+    }
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "background-tab-missing-proof",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("create_tab"),
+            "product": .string("chrome"),
+            "url": .string("https://example.com/requested")
+        ])
+    ))
+    #expect(!response.ok)
+    #expect(response.error?.code == "BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID")
 }
 
 @Test func browserAutomationBrokerTrustedInputFailsClosedUnlessExactTargetIsForeground() throws {
@@ -276,6 +306,50 @@ import Testing
     #expect(BrowserAutomationBroker.supportedActions.contains("trusted_input"))
 }
 
+private final class BrowserRuntimeBox: @unchecked Sendable {
+    let runtime: PluginRuntime
+    init(_ runtime: PluginRuntime) { self.runtime = runtime }
+}
+
+@Test func browserReadProbesBypassBusyMutationAndCompetingMutationFailsFast() throws {
+    let createStarted = DispatchSemaphore(value: 0)
+    let releaseCreate = DispatchSemaphore(value: 0)
+    let createFinished = DispatchSemaphore(value: 0)
+    let separator = String(UnicodeScalar(30)!)
+    let broker = BrowserAutomationBroker { _, args, _ in
+        let script = args.joined(separator: "\n")
+        if script.contains("make new tab") {
+            let requestedURL = args.last ?? ""
+            createStarted.signal()
+            _ = releaseCreate.wait(timeout: .now() + 2)
+            return BrowserAutomationCommandResult(status: 0, stdout: ["10", UUID().uuidString, requestedURL, requestedURL].joined(separator: separator))
+        }
+        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}Example\u{1e}0\u{1e}0\u{1e}800\u{1e}600")
+    }
+    let box = BrowserRuntimeBox(PluginRuntime(browserAutomation: broker))
+    DispatchQueue.global().async {
+        _ = box.runtime.handle(RPCRequest(
+            id: "slow-create", method: "macos_browser_automation",
+            params: .object(["protocolVersion": .number(1), "action": .string("create_tab"), "product": .string("chrome"), "url": .string("https://slow.example")])
+        ))
+        createFinished.signal()
+    }
+    #expect(createStarted.wait(timeout: .now() + 1) == .success)
+    let metadata = box.runtime.handle(RPCRequest(
+        id: "metadata-while-create", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("metadata"), "product": .string("chrome")])
+    ))
+    #expect(metadata.ok)
+    let competing = box.runtime.handle(RPCRequest(
+        id: "competing-create", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("create_tab"), "product": .string("chrome"), "url": .string("https://competing.example")])
+    ))
+    #expect(!competing.ok)
+    #expect(competing.error?.code == "BROWSER_AUTOMATION_SERIALIZATION_BUSY")
+    releaseCreate.signal()
+    #expect(createFinished.wait(timeout: .now() + 1) == .success)
+}
+
 @Test func liveBrowserAutomationStaysInBackgroundWhenExplicitlyEnabled() throws {
     guard ProcessInfo.processInfo.environment["FORGE_DESKTOP_LIVE_BROWSER_E2E"] == "1" else { return }
     let broker = BrowserAutomationBroker()
@@ -290,13 +364,35 @@ import Testing
         catch { throw NSError(domain: "forge.desktop.live-browser-e2e", code: 1, userInfo: [NSLocalizedDescriptionKey: "action \(action) failed after \(String(format: "%.2f", Date().timeIntervalSince(started)))s: \(error)"]) }
     }
     func create(_ url: String) throws -> JSONValue {
-        let parts = try value("create_tab", extra: ["url": .string(url)]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+        let response = try broker.execute(params: .object([
+            "protocolVersion": .number(1), "action": .string("create_tab"), "product": .string("chrome"),
+            "timeoutMs": .number(5_000), "url": .string(url)
+        ]))
+        let parts = response["value"]?.stringValue?.split(separator: separator, omittingEmptySubsequences: false).map(String.init) ?? []
         #expect(parts.count == 2)
-        return .object(["windowId": .string(parts[0]), "tabId": .string(parts[1])])
+        #expect(response["navigation"]?["requestedUrl"]?.stringValue == url)
+        #expect(response["navigation"]?["assignmentAccepted"]?.boolValue == true)
+        return response["ref"] ?? .object(["windowId": .string(parts[0]), "tabId": .string(parts[1])])
     }
     let before = try value("metadata").split(separator: separator, omittingEmptySubsequences: false).map(String.init)
     let originalURL = before[1]
     let originalFrontmostPid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+    let exactTuneMyMusicURL = "https://www.tunemymusic.com/transfer/spotify-to-apple-music"
+    let tuneMyMusicRef = try create(exactTuneMyMusicURL)
+    defer { _ = try? value("close_tab", extra: ["ref": tuneMyMusicRef]) }
+    Thread.sleep(forTimeInterval: 0.7)
+    let tuneMyMusicMetadata = try value("metadata", extra: ["ref": tuneMyMusicRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)
+    #expect(tuneMyMusicMetadata.count >= 10)
+    #expect(tuneMyMusicMetadata[8] == tuneMyMusicRef.objectValue?["tabId"]?.stringValue)
+    #expect(tuneMyMusicMetadata[9] == "false")
+    #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
+
+    for _ in 0..<3 {
+        _ = try value("metadata")
+        _ = try value("list_tabs")
+        #expect(NSWorkspace.shared.frontmostApplication?.processIdentifier == originalFrontmostPid)
+    }
+
     let oldRef = try create("about:blank")
     defer { _ = try? value("close_tab", extra: ["ref": oldRef]) }
     let target = try value("metadata", extra: ["ref": oldRef]).split(separator: separator, omittingEmptySubsequences: false).map(String.init)

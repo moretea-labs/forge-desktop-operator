@@ -68,6 +68,8 @@ Forge may call the provider's internal `macos_browser_automation` RPC for bounde
 
 The handshake declares `internalCapabilities=["macos_browser_automation.v1"]`, `browserAutomationProtocolVersion`, and the exact `browserAutomationActions`. Forge must verify the required action before issuing the internal RPC; matching the public plugin version alone is not capability proof.
 
+Provider `v0.2.2` keeps `macos_browser_automation.v1` and public plugin protocol `1.0` backward compatible. `create_tab` still returns the legacy `result.value` as `<windowId><RS><tabId>`, and additionally returns `result.ref` plus `result.navigation` provenance: the exact `requestedUrl`, `assignmentAccepted=true`, the accepted assignment mechanism, and the URL observed immediately after Chrome accepted the explicit URL assignment. A consumer can therefore distinguish an accepted navigation followed by redirect/canonicalization from a missing or failed assignment without adopting another tab or using positional tab fallback.
+
 The internal broker is background-first:
 
 - `create_tab` creates a tab at the end of the current browser window and restores the original active-tab index;

@@ -18,7 +18,7 @@ process.stdout.write(`${JSON.stringify({
   providerInstall: {
     kind: 'desktop_operator',
     pluginId: 'desktop_operator',
-    pluginVersion: '0.2.1',
+    pluginVersion: '0.2.2',
     protocolVersion: '1.0',
     socketPath: installed.socketPath,
     launchAgentLabel: 'com.moretea.forge.desktop-operator',
