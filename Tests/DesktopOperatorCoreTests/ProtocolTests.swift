@@ -85,6 +85,16 @@ import Testing
         )
     }
 }
+@Test func applicationDriverDetectsLockedConsoleSessionDictionary() {
+    let locked = ["CGSSessionScreenIsLocked": true] as CFDictionary
+    let unlocked = ["CGSSessionScreenIsLocked": false] as CFDictionary
+    let unrelated = ["kCGSessionLoginDoneKey": true] as CFDictionary
+    #expect(ApplicationDriver.sessionIsLocked(locked))
+    #expect(!ApplicationDriver.sessionIsLocked(unlocked))
+    #expect(!ApplicationDriver.sessionIsLocked(unrelated))
+    #expect(!ApplicationDriver.sessionIsLocked(nil))
+}
+
 @Test func applicationDriverRejectsDeadPids() {
     #expect(ApplicationDriver.processIsAlive(ProcessInfo.processInfo.processIdentifier))
     #expect(!ApplicationDriver.processIsAlive(Int32.max))

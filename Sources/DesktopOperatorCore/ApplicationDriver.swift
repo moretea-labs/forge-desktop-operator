@@ -229,9 +229,27 @@ public enum ApplicationDriver {
         )
     }
 
+    static func sessionIsLocked(_ dictionary: CFDictionary?) -> Bool {
+        guard let dictionary else { return false }
+        let values = dictionary as NSDictionary
+        return (values["CGSSessionScreenIsLocked"] as? Bool) == true
+    }
+
+    private static func currentSessionIsLocked() -> Bool {
+        sessionIsLocked(CGSessionCopyCurrentDictionary())
+    }
+
     public static func activate(_ application: NSRunningApplication, timeoutSeconds: TimeInterval = 5) throws {
         guard !application.isTerminated, processIsAlive(application.processIdentifier) else {
             throw PluginError(code: "APP_ACTIVATION_FAILED", message: "Target application is no longer running", retryable: true, domain: "application")
+        }
+        if currentSessionIsLocked() {
+            throw PluginError(
+                code: "APP_ACTIVATION_UNAVAILABLE_CONSOLE_LOCKED",
+                message: "The macOS GUI console is locked; no ordinary application can become system foreground until the user session is unlocked",
+                retryable: true,
+                domain: "application"
+            )
         }
         let pid = application.processIdentifier
         try establishForegroundAuthority(
