@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="0.2.2"
+VERSION="0.2.3"
 BUNDLE_ID="com.moretea.forge.desktop-operator"
 LABEL="$BUNDLE_ID"
 APP_NAME="Forge Desktop Operator"

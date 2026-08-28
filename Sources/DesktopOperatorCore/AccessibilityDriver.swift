@@ -109,37 +109,34 @@ public final class AccessibilityDriver {
                 "snapshot_revision": .number(Double(session.record.snapshotRevision))
             ])
         }
-        let action: CFString
-        let method: String
-        switch semanticAction {
-        case "press":
-            action = kAXPressAction as CFString
-            method = "AXPress_background"
-        case "show_menu":
-            action = kAXShowMenuAction as CFString
-            method = "AXShowMenu_background"
-        case "pick":
-            action = kAXPickAction as CFString
-            method = "AXPick_background"
-        case "open":
-            action = "AXOpen" as CFString
-            method = "AXOpen_background"
-        case "confirm":
-            action = "AXConfirm" as CFString
-            method = "AXConfirm_background"
-        default:
-            throw PluginError.invalidArguments("desktop_press semantic_action must be press, show_menu, pick, open, or confirm")
-        }
-        var result = AXUIElementPerformAction(element, action)
+        let semantic = try Self.semanticAccessibilityAction(semanticAction)
+        var result = AXUIElementPerformAction(element, semantic.action)
         if result == .cannotComplete {
             Thread.sleep(forTimeInterval: 0.15)
-            result = AXUIElementPerformAction(element, action)
+            result = AXUIElementPerformAction(element, semantic.action)
         }
         if result == .success {
             return .object([
-                "method": .string(method),
+                "method": .string(semantic.method),
+                "semantic_action": .string(semanticAction),
                 "snapshot_revision": .number(Double(session.record.snapshotRevision))
             ])
+        }
+        if semantic.isScroll, result == .actionUnsupported {
+            throw PluginError(
+                code: "AX_SCROLL_ACTION_UNSUPPORTED",
+                message: "Selected Accessibility element does not support \(semantic.action as String).",
+                retryable: false,
+                domain: "accessibility"
+            )
+        }
+        if semantic.isScroll {
+            throw PluginError(
+                code: "AX_SCROLL_FAILED",
+                message: "\(semantic.action as String) failed with code \(result.rawValue)",
+                retryable: result == .cannotComplete,
+                domain: "accessibility"
+            )
         }
         throw PluginError(
             code: coordinateFallback ? "BACKGROUND_SAFE_COORDINATE_FALLBACK_DISABLED" : "AX_PRESS_FAILED",
@@ -149,6 +146,27 @@ public final class AccessibilityDriver {
             retryable: result == .cannotComplete,
             domain: "accessibility"
         )
+    }
+
+    static func semanticAccessibilityAction(_ semanticAction: String) throws -> (action: CFString, method: String, isScroll: Bool) {
+        switch semanticAction {
+        case "press":
+            return (kAXPressAction as CFString, "AXPress_background", false)
+        case "show_menu":
+            return (kAXShowMenuAction as CFString, "AXShowMenu_background", false)
+        case "pick":
+            return (kAXPickAction as CFString, "AXPick_background", false)
+        case "open":
+            return ("AXOpen" as CFString, "AXOpen_background", false)
+        case "confirm":
+            return ("AXConfirm" as CFString, "AXConfirm_background", false)
+        case "scroll_down_page":
+            return ("AXScrollDownByPage" as CFString, "AXScrollDownByPage_background", true)
+        case "scroll_up_page":
+            return ("AXScrollUpByPage" as CFString, "AXScrollUpByPage_background", true)
+        default:
+            throw PluginError.invalidArguments("desktop_press semantic_action must be press, show_menu, pick, open, confirm, scroll_down_page, or scroll_up_page")
+        }
     }
 
     static func coordinateFallbackSelector(_ selector: ElementSelector, applicationWasActive: Bool) throws -> ElementSelector {

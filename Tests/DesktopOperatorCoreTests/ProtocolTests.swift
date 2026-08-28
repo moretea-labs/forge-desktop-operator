@@ -62,6 +62,27 @@ import Testing
     #expect(alreadyActive == refOnly)
 }
 
+@Test func desktopPressSemanticScrollActionsAreOnePageAccessibilityActions() throws {
+    let press = try AccessibilityDriver.semanticAccessibilityAction("press")
+    #expect(press.action as String == "AXPress")
+    #expect(press.method == "AXPress_background")
+    #expect(!press.isScroll)
+
+    let down = try AccessibilityDriver.semanticAccessibilityAction("scroll_down_page")
+    #expect(down.action as String == "AXScrollDownByPage")
+    #expect(down.method == "AXScrollDownByPage_background")
+    #expect(down.isScroll)
+
+    let up = try AccessibilityDriver.semanticAccessibilityAction("scroll_up_page")
+    #expect(up.action as String == "AXScrollUpByPage")
+    #expect(up.method == "AXScrollUpByPage_background")
+    #expect(up.isScroll)
+
+    #expect(throws: PluginError.self) {
+        _ = try AccessibilityDriver.semanticAccessibilityAction("scroll_raw_delta")
+    }
+}
+
 @Test func forcedCoordinatePressUsesBoundedElementCenter() throws {
     let point = try AccessibilityDriver.coordinateClickPoint(
         frame: DesktopFrame(x: 100, y: 200, width: 40, height: 20),
