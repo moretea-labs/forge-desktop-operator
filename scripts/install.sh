@@ -43,6 +43,7 @@ cat >"$APP_CONTENTS/Info.plist" <<PLIST
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>CFBundleVersion</key><string>1</string>
+  <key>NSAppleEventsUsageDescription</key><string>Forge Desktop Operator uses Apple Events only for bounded browser automation requested through Forge.</string>
   <key>LSUIElement</key><true/>
 </dict>
 </plist>
