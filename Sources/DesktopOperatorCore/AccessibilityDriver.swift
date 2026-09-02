@@ -65,6 +65,7 @@ public final class AccessibilityDriver {
             maxNodes: max(1, min(maxNodes, 5_000)),
             includeValues: includeValues,
             includeActions: includeActions,
+            includeApplicationExtras: rootSelector == nil,
             counter: &counter,
             truncated: &truncated,
             visited: &visited
@@ -250,7 +251,14 @@ public final class AccessibilityDriver {
         var visited = 0
         var seen = VisitedElements()
         _ = seen.insert(root)
-        if let match = find(element: root, selector: selector, visited: &visited, limit: 5_000, seen: &seen) {
+        if let match = find(
+            element: root,
+            selector: selector,
+            visited: &visited,
+            limit: 5_000,
+            seen: &seen,
+            includeApplicationExtras: true
+        ) {
             return match
         }
         throw PluginError(
@@ -262,7 +270,14 @@ public final class AccessibilityDriver {
         )
     }
 
-    private func find(element: AXUIElement, selector: ElementSelector, visited: inout Int, limit: Int, seen: inout VisitedElements) -> AXUIElement? {
+    private func find(
+        element: AXUIElement,
+        selector: ElementSelector,
+        visited: inout Int,
+        limit: Int,
+        seen: inout VisitedElements,
+        includeApplicationExtras: Bool = false
+    ) -> AXUIElement? {
         guard visited < limit else { return nil }
         visited += 1
         let matchesRole = selector.role == nil || stringAttribute(element, kAXRoleAttribute as CFString) == selector.role
@@ -271,9 +286,15 @@ public final class AccessibilityDriver {
         if matchesRole && matchesTitle && matchesIdentifier && (selector.role != nil || selector.title != nil || selector.identifier != nil) {
             return element
         }
-        for child in children(of: element) {
+        for child in children(of: element, includeApplicationExtras: includeApplicationExtras) {
             guard seen.insert(child) else { continue }
-            if let found = find(element: child, selector: selector, visited: &visited, limit: limit, seen: &seen) { return found }
+            if let found = find(
+                element: child,
+                selector: selector,
+                visited: &visited,
+                limit: limit,
+                seen: &seen
+            ) { return found }
         }
         return nil
     }
@@ -287,6 +308,7 @@ public final class AccessibilityDriver {
         maxNodes: Int,
         includeValues: Bool,
         includeActions: Bool,
+        includeApplicationExtras: Bool = false,
         counter: inout Int,
         truncated: inout Bool,
         visited: inout VisitedElements
@@ -297,7 +319,7 @@ public final class AccessibilityDriver {
         let role = stringAttribute(element, kAXRoleAttribute as CFString)
         let secure = role == "AXSecureTextField"
         var childNodes: [AXNode] = []
-        let childElements = children(of: element)
+        let childElements = children(of: element, includeApplicationExtras: includeApplicationExtras)
         if depth < maxDepth && counter < maxNodes {
             for child in childElements {
                 guard counter < maxNodes else { truncated = true; break }
@@ -362,8 +384,51 @@ public final class AccessibilityDriver {
         return .string(String(describing: value))
     }
 
-    private func children(of element: AXUIElement) -> [AXUIElement] {
-        attribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+    private func children(of element: AXUIElement, includeApplicationExtras: Bool = false) -> [AXUIElement] {
+        let directChildren = attribute(element, kAXChildrenAttribute as CFString) as? [AXUIElement] ?? []
+        guard includeApplicationExtras else { return directChildren }
+
+        let windows = attribute(element, kAXWindowsAttribute as CFString) as? [AXUIElement] ?? []
+        let focusedWindow = elementAttribute(element, kAXFocusedWindowAttribute as CFString)
+        let mainWindow = elementAttribute(element, kAXMainWindowAttribute as CFString)
+        let menuBar = elementAttribute(element, kAXMenuBarAttribute as CFString)
+        let focusedElement = elementAttribute(element, kAXFocusedUIElementAttribute as CFString)
+        return Self.mergeApplicationTraversalElements(
+            children: directChildren,
+            windows: windows,
+            focusedWindow: focusedWindow,
+            mainWindow: mainWindow,
+            menuBar: menuBar,
+            focusedElement: focusedElement
+        )
+    }
+
+    static func mergeApplicationTraversalElements(
+        children: [AXUIElement],
+        windows: [AXUIElement],
+        focusedWindow: AXUIElement?,
+        mainWindow: AXUIElement?,
+        menuBar: AXUIElement?,
+        focusedElement: AXUIElement?
+    ) -> [AXUIElement] {
+        var result: [AXUIElement] = []
+        func appendUnique(_ element: AXUIElement?) {
+            guard let element, !result.contains(where: { CFEqual($0, element) }) else { return }
+            result.append(element)
+        }
+
+        children.forEach { appendUnique($0) }
+        appendUnique(focusedWindow)
+        appendUnique(mainWindow)
+        windows.forEach { appendUnique($0) }
+        appendUnique(menuBar)
+        appendUnique(focusedElement)
+        return result
+    }
+
+    private func elementAttribute(_ element: AXUIElement, _ name: CFString) -> AXUIElement? {
+        guard let value = attribute(element, name), CFGetTypeID(value) == AXUIElementGetTypeID() else { return nil }
+        return unsafeDowncast(value, to: AXUIElement.self)
     }
 
     private func actionNames(of element: AXUIElement) -> [String] {
