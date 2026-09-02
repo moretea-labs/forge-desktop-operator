@@ -13,7 +13,9 @@ Methods:
 - `handshake`: protocol/plugin identity plus declared internal broker protocol and action support;
 - `manifest`: static manifest;
 - `health`: dynamic readiness;
-- `execute`: typed desktop action;
+- `execute`: typed Desktop/Computer action declared by the public plugin manifest;
+- `computer_execute`: provider-neutral Computer capability execution; currently used for `computer.browser_automation.v1`;
+- `macos_browser_automation`: deprecated compatibility alias for legacy Forge clients;
 - `shutdown`: graceful service stop.
 
 Execute parameters:
@@ -80,3 +82,14 @@ The internal broker is background-first:
 - targeted cross-URL `navigate` fails with `BROWSER_AUTOMATION_BACKGROUND_NAVIGATION_REQUIRES_REPLACEMENT`. Forge composes a safe replacement-tab transaction instead of foregrounding a background tab or reporting a navigation that did not occur.
 
 Physical desktop interaction remains a separate boundary. Coordinate presses require the target application to be truly frontmost; activation success is checked against the system frontmost application before such input is allowed.
+## Computer capability negotiation
+
+`handshake` and `health` include `computerCapabilities`, an array of runtime descriptors with `capabilityId`, integer `protocolVersion`, transport `method`, and bounded `actions`. Static availability remains declared in `forge-plugin.json`; runtime descriptors are negotiation evidence, not a second manifest.
+
+A native browser request uses:
+
+```json
+{"id":"computer-1","method":"computer_execute","params":{"capability":"computer.browser_automation.v1","protocolVersion":1,"arguments":{"action":"list_tabs","product":"chrome"}}}
+```
+
+The provider rejects unknown Computer capabilities and protocol versions before native dispatch. `macos_browser_automation` remains temporarily accepted with its historical inner `protocolVersion: 1`, but both methods enter the same bounded native dispatcher. No arbitrary shell or AppleScript method is exposed.

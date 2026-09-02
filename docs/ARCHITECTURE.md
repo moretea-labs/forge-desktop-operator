@@ -74,3 +74,8 @@ This state is independent from Controller releases, Git worktrees, and repositor
 ## Current integration boundary
 
 The repository and plugin registration descriptor are implemented, and Forge consumes the provider through the external plugin registration/broker path rather than importing provider source. The provider remains independently buildable and releasable.
+## Computer provider boundary
+
+Forge Desktop Operator is the macOS native provider for Forge's provider-neutral `Computer` capability surface. The provider remains an independent repository, release, App bundle, LaunchAgent, Unix socket, TCC identity, and native session owner. Forge owns Browser semantics, Work/Controller authority, provider selection, and cross-provider policy.
+
+The provider advertises `computer.observe.v1`, `computer.input.v1`, `computer.capture.v1`, and `computer.browser_automation.v1`. Normal Desktop actions continue through the versioned `execute` RPC. Native browser operations use the provider-neutral `computer_execute` RPC. The historical `macos_browser_automation` method remains a compatibility alias for one migration generation and must dispatch through the same `ComputerProviderRuntime`; it is not a second Browser authority. `BrowserAutomationBroker` is an internal macOS native driver and must not own Forge Browser sessions or transport negotiation.

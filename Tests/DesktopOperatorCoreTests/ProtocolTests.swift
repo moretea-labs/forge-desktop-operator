@@ -19,6 +19,12 @@ import Testing
     #expect(response.ok)
     #expect(response.result?["pluginId"]?.stringValue == "desktop_operator")
     #expect(response.result?["protocolVersion"]?.stringValue == "1.0")
+    let computerCapabilities = response.result?["computerCapabilities"]?.arrayValue ?? []
+    #expect(Set(computerCapabilities.compactMap { $0["capabilityId"]?.stringValue }) == Set(ComputerProviderProtocol.allCapabilities))
+    let browserCapability = computerCapabilities.first { $0["capabilityId"]?.stringValue == ComputerProviderProtocol.browserAutomationCapability }
+    #expect(browserCapability?["method"]?.stringValue == ComputerProviderProtocol.executionMethod)
+    #expect(browserCapability?["protocolVersion"]?.intValue == ComputerProviderProtocol.protocolVersion)
+    #expect(Set(browserCapability?["actions"]?.arrayValue?.compactMap(\.stringValue) ?? []) == Set(BrowserAutomationBroker.supportedActions))
     #expect(response.result?["internalCapabilities"]?.arrayValue?.compactMap(\.stringValue).contains("macos_browser_automation.v1") == true)
     #expect(response.result?["browserAutomationProtocolVersion"]?.intValue == 1)
     #expect(response.result?["browserAutomationActions"]?.arrayValue?.compactMap(\.stringValue).contains("list_tabs") == true)

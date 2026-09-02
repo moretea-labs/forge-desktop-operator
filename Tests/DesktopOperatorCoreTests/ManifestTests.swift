@@ -12,6 +12,8 @@ import Testing
     #expect(json["protocolVersion"]?.stringValue == PluginManifest.current.protocolVersion)
     #expect(json["scope"]?.stringValue == "controller")
     #expect(Set(json["actions"]?.arrayValue?.compactMap(\.stringValue) ?? []) == Set(PluginManifest.current.actions))
+    #expect(Set(json["capabilities"]?.arrayValue?.compactMap(\.stringValue) ?? []) == Set(PluginManifest.current.capabilities))
+    #expect(Set(ComputerProviderProtocol.allCapabilities).isSubset(of: Set(PluginManifest.current.capabilities)))
     #expect(PluginManifest.current.name == "Forge Desktop Operator")
     #expect(PluginManifest.current.capabilities.contains("desktop.clipboard"))
     #expect(Set(["desktop_clipboard_read", "desktop_clipboard_write", "desktop_copy", "desktop_paste"]).isSubset(of: Set(PluginManifest.current.actions)))
@@ -87,4 +89,15 @@ import Testing
         #expect(error.code == "INVALID_ARGUMENTS")
         #expect(error.message.contains("unsupported desktop permission service"))
     }
+}
+@Test func providerInstallerDerivesReleaseIdentityFromInstalledManifest() throws {
+    let testFile = URL(fileURLWithPath: #filePath)
+    let root = testFile.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+    let installer = try String(contentsOf: root.appendingPathComponent("forge-plugin-install.mjs"), encoding: .utf8)
+    let installScript = try String(contentsOf: root.appendingPathComponent("scripts/install.sh"), encoding: .utf8)
+    #expect(installer.contains("installedManifest.version"))
+    #expect(installer.contains("installedManifest.protocolVersion"))
+    #expect(!installer.contains("pluginVersion: '0.2.3'"))
+    #expect(installScript.contains("forge-plugin.json"))
+    #expect(!installScript.contains("VERSION=\"0.2.3\""))
 }

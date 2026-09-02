@@ -7,19 +7,27 @@ public final class PluginRuntime {
     public let startedAt = Date()
     public let sessions: DesktopSessionStore
     public let accessibility = AccessibilityDriver()
-    public let browserAutomation: BrowserAutomationBroker
+    private let computerProvider: ComputerProviderRuntime
     public private(set) var shutdownRequested = false
     public let socketPath: String
     private let uiLock = NSRecursiveLock()
-    private let browserLock = NSRecursiveLock()
 
     public init(
         socketPath: String = PluginPaths.defaultSocketPath,
-        browserAutomation: BrowserAutomationBroker = BrowserAutomationBroker(),
         sessions: DesktopSessionStore = DesktopSessionStore(statePath: nil)
     ) {
         self.socketPath = socketPath
-        self.browserAutomation = browserAutomation
+        self.computerProvider = ComputerProviderRuntime(browserAutomation: BrowserAutomationBroker())
+        self.sessions = sessions
+    }
+
+    init(
+        socketPath: String = PluginPaths.defaultSocketPath,
+        browserAutomation: BrowserAutomationBroker,
+        sessions: DesktopSessionStore = DesktopSessionStore(statePath: nil)
+    ) {
+        self.socketPath = socketPath
+        self.computerProvider = ComputerProviderRuntime(browserAutomation: browserAutomation)
         self.sessions = sessions
     }
 
@@ -57,8 +65,9 @@ public final class PluginRuntime {
                 DesktopPermissions.accessibility(granted: accessibility.trusted),
                 DesktopPermissions.screenRecording(granted: ScreenshotDriver.screenRecordingGranted),
             ],
-            internalCapabilities: ["macos_browser_automation.v1"],
-            browserAutomationProtocolVersion: BrowserAutomationBroker.protocolVersion,
+            computerCapabilities: computerProvider.capabilities,
+            internalCapabilities: [LegacyBrowserAutomationProtocol.capability],
+            browserAutomationProtocolVersion: LegacyBrowserAutomationProtocol.protocolVersion,
             browserAutomationActions: BrowserAutomationBroker.supportedActions,
             warnings: warnings
         )
@@ -329,8 +338,9 @@ public final class PluginRuntime {
                 pluginVersion: PluginManifest.current.version,
                 processId: getpid(),
                 startedAt: startedAt,
-                internalCapabilities: ["macos_browser_automation.v1"],
-                browserAutomationProtocolVersion: BrowserAutomationBroker.protocolVersion,
+                computerCapabilities: computerProvider.capabilities,
+                internalCapabilities: [LegacyBrowserAutomationProtocol.capability],
+                browserAutomationProtocolVersion: LegacyBrowserAutomationProtocol.protocolVersion,
                 browserAutomationActions: BrowserAutomationBroker.supportedActions
             ))
         case "manifest":
@@ -341,13 +351,12 @@ public final class PluginRuntime {
             guard let paramsValue = request.params else { throw PluginError.invalidArguments("execute requires params") }
             let params = try decode(ExecuteParams.self, from: paramsValue)
             return try execute(action: params.action, arguments: params.arguments)
-        case "macos_browser_automation":
+        case ComputerProviderProtocol.executionMethod:
+            guard let paramsValue = request.params else { throw PluginError.invalidArguments("computer_execute requires params") }
+            return try computerProvider.execute(decode(ComputerExecuteParams.self, from: paramsValue))
+        case LegacyBrowserAutomationProtocol.method:
             guard let paramsValue = request.params else { throw PluginError.invalidArguments("macos_browser_automation requires params") }
-            let action = paramsValue["action"]?.stringValue
-            if action == "metadata" || action == "list_tabs" || action == "capture_region" {
-                return try browserAutomation.execute(params: paramsValue)
-            }
-            return try withBrowserLock { try browserAutomation.execute(params: paramsValue) }
+            return try computerProvider.executeLegacyBrowserAutomation(paramsValue)
         case "shutdown":
             shutdownRequested = true
             return .object(["shutting_down": .bool(true)])
@@ -360,14 +369,6 @@ public final class PluginRuntime {
     private func withUILock<T>(_ body: () throws -> T) rethrows -> T {
         uiLock.lock()
         defer { uiLock.unlock() }
-        return try body()
-    }
-
-    private func withBrowserLock<T>(_ body: () throws -> T) throws -> T {
-        guard browserLock.try() else {
-            throw PluginError(code: "BROWSER_AUTOMATION_SERIALIZATION_BUSY", message: "Another browser mutation is still in progress; retry instead of waiting inside the Unix-socket request.", retryable: true, domain: "browser")
-        }
-        defer { browserLock.unlock() }
         return try body()
     }
 

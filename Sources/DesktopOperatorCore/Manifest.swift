@@ -20,7 +20,7 @@ public struct PluginManifest: Codable, Equatable, Sendable {
     public static let current = PluginManifest(
         id: "desktop_operator",
         name: "Forge Desktop Operator",
-        version: "0.2.3",
+        version: "0.3.0",
         protocolVersion: "1.0",
         mode: "external",
         scope: "controller",
@@ -34,7 +34,11 @@ public struct PluginManifest: Codable, Equatable, Sendable {
             "desktop.interact",
             "desktop.capture",
             "desktop.clipboard",
-            "desktop.batch"
+            "desktop.batch",
+            ComputerProviderProtocol.observeCapability,
+            ComputerProviderProtocol.inputCapability,
+            ComputerProviderProtocol.captureCapability,
+            ComputerProviderProtocol.browserAutomationCapability
         ],
         actions: [
             "desktop_status",
@@ -64,6 +68,7 @@ public struct HandshakeResult: Codable, Equatable, Sendable {
     public let pluginVersion: String
     public let processId: Int32
     public let startedAt: Date
+    public let computerCapabilities: [ComputerCapabilityRuntimeDescriptor]
     public let internalCapabilities: [String]
     public let browserAutomationProtocolVersion: Int
     public let browserAutomationActions: [String]
@@ -122,6 +127,7 @@ public struct HealthResult: Codable, Equatable, Sendable {
     public let providerBundleIdentifier: String
     public let providerApplicationPath: String
     public let permissions: [DesktopPermissionReadiness]
+    public let computerCapabilities: [ComputerCapabilityRuntimeDescriptor]
     public let internalCapabilities: [String]
     public let browserAutomationProtocolVersion: Int
     public let browserAutomationActions: [String]

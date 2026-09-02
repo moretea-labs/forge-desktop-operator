@@ -2,7 +2,9 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-VERSION="0.2.3"
+VERSION="$(awk -F'"' '/^[[:space:]]*"version"[[:space:]]*:/ {print $4; exit}' "$ROOT/forge-plugin.json")"
+PROTOCOL_VERSION="$(awk -F'"' '/^[[:space:]]*"protocolVersion"[[:space:]]*:/ {print $4; exit}' "$ROOT/forge-plugin.json")"
+[[ -n "$VERSION" && -n "$PROTOCOL_VERSION" ]] || { echo "forge-plugin.json is missing version/protocolVersion" >&2; exit 2; }
 BUNDLE_ID="com.moretea.forge.desktop-operator"
 LABEL="$BUNDLE_ID"
 APP_NAME="Forge Desktop Operator"
@@ -72,7 +74,8 @@ cat >"$REG_DIR/registration.json" <<JSON
   "schemaVersion": 1,
   "pluginId": "desktop_operator",
   "scope": "controller",
-  "protocolVersion": "1.0",
+  "pluginVersion": "$VERSION",
+  "protocolVersion": "$PROTOCOL_VERSION",
   "transport": "unix-socket-jsonl",
   "socketPath": "$SOCKET",
   "executablePath": "$APP_EXECUTABLE",

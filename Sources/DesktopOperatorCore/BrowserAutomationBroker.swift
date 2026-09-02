@@ -2,38 +2,38 @@ import AppKit
 import ApplicationServices
 import Foundation
 
-public struct BrowserAutomationCommandResult: Equatable {
-    public let status: Int32
-    public let stdout: String
-    public let stderr: String
+struct BrowserAutomationCommandResult: Equatable {
+    let status: Int32
+    let stdout: String
+    let stderr: String
 
-    public init(status: Int32, stdout: String = "", stderr: String = "") {
+    init(status: Int32, stdout: String = "", stderr: String = "") {
         self.status = status
         self.stdout = stdout
         self.stderr = stderr
     }
 }
 
-public struct BrowserAutomationTrustedInputCommand: Equatable {
-    public let kind: String
-    public let x: Double?
-    public let y: Double?
-    public let fromX: Double?
-    public let fromY: Double?
-    public let toX: Double?
-    public let toY: Double?
-    public let deltaX: Double?
-    public let deltaY: Double?
-    public let button: String?
-    public let clickCount: Int?
-    public let steps: Int?
-    public let key: String?
-    public let text: String?
+struct BrowserAutomationTrustedInputCommand: Equatable {
+    let kind: String
+    let x: Double?
+    let y: Double?
+    let fromX: Double?
+    let fromY: Double?
+    let toX: Double?
+    let toY: Double?
+    let deltaX: Double?
+    let deltaY: Double?
+    let button: String?
+    let clickCount: Int?
+    let steps: Int?
+    let key: String?
+    let text: String?
 }
 
-public final class BrowserAutomationBroker {
-    public typealias CommandRunner = (_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult
-    public typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
+final class BrowserAutomationBroker {
+    typealias CommandRunner = (_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult
+    typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
 
     private struct BrowserDefinition {
         let appName: String
@@ -52,8 +52,7 @@ public final class BrowserAutomationBroker {
         let height: Double
     }
 
-    public static let protocolVersion = 1
-    public static let supportedActions = [
+    static let supportedActions = [
         "metadata",
         "list_tabs",
         "create_tab",
@@ -79,13 +78,13 @@ public final class BrowserAutomationBroker {
     private let frontmostBundleIdentifier: () -> String?
     private let trustedInputPerformer: TrustedInputPerformer
 
-    public init() {
+    init() {
         self.runner = Self.runCommand
         self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
         self.trustedInputPerformer = Self.performTrustedInput
     }
 
-    public init(
+    init(
         runner: @escaping CommandRunner,
         frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
     ) {
@@ -94,7 +93,7 @@ public final class BrowserAutomationBroker {
         self.trustedInputPerformer = Self.performTrustedInput
     }
 
-    public init(
+    init(
         runner: @escaping CommandRunner,
         frontmostBundleIdentifier: @escaping () -> String?,
         trustedInputPerformer: @escaping TrustedInputPerformer
@@ -104,11 +103,8 @@ public final class BrowserAutomationBroker {
         self.trustedInputPerformer = trustedInputPerformer
     }
 
-    public func execute(params: JSONValue) throws -> JSONValue {
+    func execute(params: JSONValue) throws -> JSONValue {
         guard let object = params.objectValue else { throw invalid("BROWSER_AUTOMATION_PARAMS_INVALID") }
-        guard object["protocolVersion"]?.intValue == Self.protocolVersion else {
-            throw invalid("BROWSER_AUTOMATION_PROTOCOL_VERSION_MISMATCH")
-        }
         guard let action = object["action"]?.stringValue else { throw invalid("BROWSER_AUTOMATION_ACTION_UNSUPPORTED") }
         let timeoutMs = boundedTimeout(object["timeoutMs"]?.intValue)
 

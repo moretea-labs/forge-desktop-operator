@@ -10,18 +10,26 @@ if (process.platform !== 'darwin') {
   process.exit(2);
 }
 const root = dirname(fileURLToPath(import.meta.url));
+const sourceManifest = JSON.parse(readFileSync(join(root, 'forge-plugin.json'), 'utf8'));
 execFileSync('/bin/bash', [join(root, 'scripts/install.sh')], { cwd: root, stdio: 'inherit' });
 const registrationPath = join(homedir(), 'Library', 'Application Support', 'Forge', 'DesktopOperator', 'registration', 'registration.json');
 const installed = JSON.parse(readFileSync(registrationPath, 'utf8'));
+const installedManifest = JSON.parse(readFileSync(installed.manifestPath, 'utf8'));
+if (installedManifest.id !== sourceManifest.id || installedManifest.version !== sourceManifest.version || installedManifest.protocolVersion !== sourceManifest.protocolVersion) {
+  throw new Error('Installed Desktop Operator manifest identity does not match the source package.');
+}
 process.stdout.write(`${JSON.stringify({
   schemaVersion: 1,
   providerInstall: {
     kind: 'desktop_operator',
-    pluginId: 'desktop_operator',
-    pluginVersion: '0.2.3',
-    protocolVersion: '1.0',
+    pluginId: installedManifest.id,
+    pluginVersion: installedManifest.version,
+    protocolVersion: installedManifest.protocolVersion,
     socketPath: installed.socketPath,
-    launchAgentLabel: 'com.moretea.forge.desktop-operator',
-    expectedProgramContains: 'Forge Desktop Operator.app'
-  }
-})}\n`);
+    executablePath: installed.executablePath,
+    manifestPath: installed.manifestPath,
+    serviceManager: installed.serviceManager,
+    bundleIdentifier: installed.bundleIdentifier,
+  },
+})}
+`);

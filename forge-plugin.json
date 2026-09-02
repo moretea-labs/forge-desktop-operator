@@ -2,7 +2,7 @@
   "$schema": "./schemas/forge-plugin.schema.json",
   "id": "desktop_operator",
   "name": "Forge Desktop Operator",
-  "version": "0.2.3",
+  "version": "0.3.0",
   "protocolVersion": "1.0",
   "mode": "external",
   "scope": "controller",
@@ -31,7 +31,11 @@
     "desktop.interact",
     "desktop.capture",
     "desktop.clipboard",
-    "desktop.batch"
+    "desktop.batch",
+    "computer.observe.v1",
+    "computer.input.v1",
+    "computer.capture.v1",
+    "computer.browser_automation.v1"
   ],
   "actions": [
     "desktop_status",
