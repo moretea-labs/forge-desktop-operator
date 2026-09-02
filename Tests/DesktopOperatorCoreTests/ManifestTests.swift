@@ -103,5 +103,7 @@ import Testing
     #expect(installScript.contains("forge-plugin.json"))
     #expect(installScript.contains("\"launchAgentLabel\": \"$LABEL\""))
     #expect(installScript.contains("\"expectedProgramContains\": \"$APP_NAME.app\""))
+    #expect(installScript.contains("request --socket \"$SOCKET\" --method health"))
+    #expect(installScript.contains("attempt<100"))
     #expect(!installScript.contains("VERSION=\"0.2.3\""))
 }

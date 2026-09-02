@@ -122,6 +122,21 @@ rm -f "$LEGACY_PLIST" "$LEGACY_SOCKET" "$LEGACY_SOCKET.lock"
 launchctl bootstrap "$DOMAIN" "$PLIST"
 launchctl enable "$DOMAIN/$LABEL"
 
+READY=0
+for ((attempt=0; attempt<100; attempt++)); do
+  if "$APP_EXECUTABLE" request --socket "$SOCKET" --method health --id install-readiness >/dev/null 2>&1; then
+    READY=1
+    break
+  fi
+  sleep 0.05
+done
+if [[ "$READY" != "1" ]]; then
+  echo "desktop_operator did not become ready on $SOCKET after launchctl bootstrap" >&2
+  launchctl print "$DOMAIN/$LABEL" >&2 || true
+  tail -40 "$LOG_DIR/stderr.log" >&2 || true
+  exit 1
+fi
+
 echo "Installed desktop_operator"
 echo "App: $APP_BUNDLE"
 echo "Bundle ID: $BUNDLE_ID"
