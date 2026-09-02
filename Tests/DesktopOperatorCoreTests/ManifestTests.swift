@@ -97,7 +97,11 @@ import Testing
     let installScript = try String(contentsOf: root.appendingPathComponent("scripts/install.sh"), encoding: .utf8)
     #expect(installer.contains("installedManifest.version"))
     #expect(installer.contains("installedManifest.protocolVersion"))
+    #expect(installer.contains("launchAgentLabel: installed.launchAgentLabel"))
+    #expect(installer.contains("expectedProgramContains: installed.expectedProgramContains"))
     #expect(!installer.contains("pluginVersion: '0.2.3'"))
     #expect(installScript.contains("forge-plugin.json"))
+    #expect(installScript.contains("\"launchAgentLabel\": \"$LABEL\""))
+    #expect(installScript.contains("\"expectedProgramContains\": \"$APP_NAME.app\""))
     #expect(!installScript.contains("VERSION=\"0.2.3\""))
 }

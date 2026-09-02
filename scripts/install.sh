@@ -81,7 +81,9 @@ cat >"$REG_DIR/registration.json" <<JSON
   "executablePath": "$APP_EXECUTABLE",
   "manifestPath": "$REG_DIR/forge-plugin.json",
   "serviceManager": "launchd-user-agent",
-  "bundleIdentifier": "$BUNDLE_ID"
+  "bundleIdentifier": "$BUNDLE_ID",
+  "launchAgentLabel": "$LABEL",
+  "expectedProgramContains": "$APP_NAME.app"
 }
 JSON
 

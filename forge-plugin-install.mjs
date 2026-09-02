@@ -30,6 +30,8 @@ process.stdout.write(`${JSON.stringify({
     manifestPath: installed.manifestPath,
     serviceManager: installed.serviceManager,
     bundleIdentifier: installed.bundleIdentifier,
+    launchAgentLabel: installed.launchAgentLabel,
+    expectedProgramContains: installed.expectedProgramContains,
   },
 })}
 `);
