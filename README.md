@@ -86,6 +86,6 @@ The public plugin identity is `desktop_operator`; the contract is declared in [`
 
 ## Project
 
-Current release: `v0.3.2`, with the provider-neutral Computer protocol, explicit trusted installer lifecycle facts, bounded service-readiness verification during install, and backward compatibility for Forge clients using the legacy macOS browser-automation alias. Issues are for reproducible provider bugs and feature requests. Cross-product Forge questions belong in the [Forge Discussions](https://github.com/moretea-labs/forge/discussions). Security reports should use GitHub Private Vulnerability Reporting; see [SECURITY.md](SECURITY.md).
+Current source candidate: `v0.4.0`, with the Unified Computer element v2 protocol, ephemeral provider bindings, semantic-first native interaction, exact-window capture, and the legacy macOS browser-automation alias retained only as migration compatibility. The published `v0.3.2` tag remains the previous capability surface until a formal v0.4.0 release is created. Issues are for reproducible provider bugs and feature requests. Cross-product Forge questions belong in the [Forge Discussions](https://github.com/moretea-labs/forge/discussions). Security reports should use GitHub Private Vulnerability Reporting; see [SECURITY.md](SECURITY.md).
 
 Licensed under the [MIT License](LICENSE).
