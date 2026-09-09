@@ -499,16 +499,20 @@ public final class PluginRuntime {
                 action: params.action,
                 value: params.value
             )
-            // Any successful semantic mutation retires the observation that authorized it.
-            // Reusing the same provider-local element ref after UI state may have changed is unsafe.
-            session.elements.removeAll(keepingCapacity: false)
-            session.elementWindowRefs.removeAll(keepingCapacity: false)
-            session.lastRootElement = nil
-            session.record.snapshotRevision += 1
-            session.record.lastObservedAt = nil
+            Self.retireObservedElementEpoch(session)
             return result
         }
         return result
+    }
+
+    /// A successful semantic mutation invalidates the exact observation that authorized it.
+    /// The next semantic action must come from a fresh observation epoch; no coordinate fallback is implied.
+    static func retireObservedElementEpoch(_ session: DesktopSessionState) {
+        session.elements.removeAll(keepingCapacity: false)
+        session.elementWindowRefs.removeAll(keepingCapacity: false)
+        session.lastRootElement = nil
+        session.record.snapshotRevision += 1
+        session.record.lastObservedAt = nil
     }
 
     private func session(from object: [String: JSONValue]) throws -> DesktopSessionState {

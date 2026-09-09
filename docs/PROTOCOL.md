@@ -2,37 +2,69 @@
 
 Each request and response is one UTF-8 JSON object followed by a newline.
 
-## Request
+## Methods
+
+- `handshake`: plugin identity, Computer runtime descriptors, and explicitly named compatibility metadata;
+- `manifest`: static provider manifest;
+- `health`: dynamic native readiness;
+- `execute`: compatibility Desktop actions declared by the public plugin manifest;
+- `computer_execute`: provider-neutral Unified Computer capability execution;
+- `macos_browser_automation`: deprecated migration-only Browser compatibility RPC;
+- `shutdown`: graceful service stop.
+
+Example request:
 
 ```json
 {"id":"request-1","method":"handshake","params":{}}
 ```
 
-Methods:
+## Provider-local interaction bindings
 
-- `handshake`: protocol/plugin identity plus declared internal broker protocol and action support;
-- `manifest`: static manifest;
-- `health`: dynamic readiness;
-- `execute`: typed Desktop/Computer action declared by the public plugin manifest;
-- `computer_execute`: provider-neutral Computer capability execution; currently used for `computer.browser_automation.v1`;
-- `macos_browser_automation`: deprecated compatibility alias for legacy Forge clients;
-- `shutdown`: graceful service stop.
+`desktop_session_open` creates or reuses a process-local provider binding to a running application. The returned interaction id is not durable Computer authority. Provider restart intentionally drops interaction ids, AX refs, snapshot revisions, and screenshot evidence; Forge must rebind and observe again from its own durable Computer target.
 
-Execute parameters:
+`desktop_observe` and `computer.element.observe.v2` create an observation epoch. Element refs such as `ax_7_24` and AX window refs are valid only for the exact interaction/application/window context and `snapshotRevision` that produced them. A new observation replaces the ref registry.
+
+A successful `computer.element.action.v2` semantic mutation retires the authorizing observation epoch. Reusing its old ref fails with `COMPUTER_ELEMENT_OBSERVATION_STALE`; callers must re-observe. Bounds are metadata only and never authorize pointer input.
+
+## Unified Computer negotiation
+
+`handshake` and `health` include `computerCapabilities`, each with `capabilityId`, integer `protocolVersion`, transport `method`, and bounded `actions`. The provider currently advertises:
+
+- `computer.observe.v1`;
+- `computer.input.v1`;
+- `computer.capture.v1`;
+- `computer.element.observe.v2`;
+- `computer.element.action.v2`.
+
+Unknown capabilities and incompatible protocol versions fail before native dispatch. `computer.browser_automation.v1` is not a Unified Computer capability of this provider.
+
+Example semantic observation request:
 
 ```json
-{
-  "action": "desktop_session_open",
-  "arguments": {
-    "bundle_id": "com.apple.TextEdit",
-    "launch": true,
-    "activate": true,
-    "reuse_existing": true
-  }
-}
+{"id":"computer-observe-1","method":"computer_execute","params":{"capability":"computer.element.observe.v2","protocolVersion":2,"arguments":{"interactionId":"desk_example"}}}
 ```
 
-`desktop_session_open` reuses a durable session for the same stable application identity by default. Pass `reuse_existing=false` only when an independent interaction lifecycle is required. After a provider restart, the interaction ID may be rebound to the still-running application, but callers must observe again because AX refs, snapshot revisions, and screenshot evidence are intentionally process-local.
+Example semantic action request shape:
+
+```json
+{"id":"computer-action-1","method":"computer_execute","params":{"capability":"computer.element.action.v2","protocolVersion":2,"arguments":{"target":{"interactionId":"desk_example","pid":123,"bundleIdentifier":"com.example.Editor","appName":"Editor","windowRef":"ax_7_1","snapshotRevision":7},"ref":"ax_7_24","action":"invoke"}}}
+```
+
+## Foreground and physical input
+
+Accessibility observation and semantic AX actions do not require foreground solely because they inspect or mutate UI. Physical pointer/keyboard actions remain separately fenced: the exact target app must already be foreground, pointer input requires fresh exact-window visual evidence, and the provider does not activate a different app as an implicit fallback.
+
+Window capture requires an exact `window_id` and uses an in-process native capture path. Capture does not activate the target application.
+
+## Browser compatibility adapter
+
+The handshake still declares `internalCapabilities=["macos_browser_automation.v1"]`, `browserAutomationProtocolVersion`, and bounded `browserAutomationActions` for migration compatibility. Forge may use this explicit legacy RPC while older Browser integration is being retired.
+
+This adapter is not a public `execute` action and is not advertised in `computerCapabilities`. Forge owns Browser policy, durable tab/session identity, allowlists, and transaction composition. The provider exposes no arbitrary shell or arbitrary AppleScript method.
+
+## Batch
+
+`desktop_batch` accepts at most 50 non-batch actions. `on_error` is `stop` or `continue`; each executed step returns its own result or structured error. Batch execution does not create a second global semantic lock: individual actions keep their own native locking/fencing requirements.
 
 ## Response
 
@@ -45,51 +77,5 @@ Success:
 Failure:
 
 ```json
-{
-  "id":"request-1",
-  "ok":false,
-  "error":{
-    "code":"ELEMENT_NOT_FOUND",
-    "message":"No Accessibility element matched the selector",
-    "retryable":true,
-    "domain":"accessibility"
-  }
-}
+{"id":"request-1","ok":false,"error":{"code":"COMPUTER_ELEMENT_OBSERVATION_STALE","message":"Re-observe before acting.","retryable":true,"domain":"accessibility"}}
 ```
-
-## Element references
-
-`desktop_observe` returns session-local refs such as `ax_3_24`. A ref remains valid for the corresponding process while the AX element remains valid. A new observation replaces the ref registry for that session. Callers may alternatively select by role, title, or identifier.
-
-## Batch
-
-`desktop_batch` accepts at most 50 non-batch actions. `on_error` is `stop` or `continue`; every executed step returns its own result or structured error.
-## Internal macOS browser broker
-
-Forge may call the provider's internal `macos_browser_automation` RPC for bounded Chrome/Vivaldi Apple Events primitives. It is intentionally not a public `execute` action in `forge-plugin.json`; Forge owns browser policy, domain allowlists, session persistence, and composition.
-
-The handshake declares `internalCapabilities=["macos_browser_automation.v1"]`, `browserAutomationProtocolVersion`, and the exact `browserAutomationActions`. Forge must verify the required action before issuing the internal RPC; matching the public plugin version alone is not capability proof.
-
-Provider `v0.2.2` keeps `macos_browser_automation.v1` and public plugin protocol `1.0` backward compatible. `create_tab` still returns the legacy `result.value` as `<windowId><RS><tabId>`, and additionally returns `result.ref` plus `result.navigation` provenance: the exact `requestedUrl`, `assignmentAccepted=true`, the accepted assignment mechanism, and the URL observed immediately after Chrome accepted the explicit URL assignment. A consumer can therefore distinguish an accepted navigation followed by redirect/canonicalization from a missing or failed assignment without adopting another tab or using positional tab fallback.
-
-The internal broker is background-first:
-
-- `create_tab` creates a tab at the end of the current browser window and restores the original active-tab index;
-- a stable `{windowId, tabId}` identifies a plugin-owned browser tab across calls;
-- targeted `metadata`, JavaScript, reload, and close operate on that exact tab without activating it;
-- target metadata avoids AppleScript title/name coercion for background Chrome tabs and includes the browser-native loading state;
-- the broker derives whether Chrome/Vivaldi is actually frontmost from macOS `NSWorkspace`, not from a potentially stale application-script property;
-- targeted cross-URL `navigate` fails with `BROWSER_AUTOMATION_BACKGROUND_NAVIGATION_REQUIRES_REPLACEMENT`. Forge composes a safe replacement-tab transaction instead of foregrounding a background tab or reporting a navigation that did not occur.
-
-Physical desktop interaction remains a separate boundary. Coordinate presses require the target application to be truly frontmost; activation success is checked against the system frontmost application before such input is allowed.
-## Computer capability negotiation
-
-`handshake` and `health` include `computerCapabilities`, an array of runtime descriptors with `capabilityId`, integer `protocolVersion`, transport `method`, and bounded `actions`. Static availability remains declared in `forge-plugin.json`; runtime descriptors are negotiation evidence, not a second manifest.
-
-A native browser request uses:
-
-```json
-{"id":"computer-1","method":"computer_execute","params":{"capability":"computer.browser_automation.v1","protocolVersion":1,"arguments":{"action":"list_tabs","product":"chrome"}}}
-```
-
-The provider rejects unknown Computer capabilities and protocol versions before native dispatch. `macos_browser_automation` remains temporarily accepted with its historical inner `protocolVersion: 1`, but both methods enter the same bounded native dispatcher. No arbitrary shell or AppleScript method is exposed.

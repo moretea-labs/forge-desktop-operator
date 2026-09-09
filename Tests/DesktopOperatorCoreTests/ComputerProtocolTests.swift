@@ -260,3 +260,118 @@ import Testing
         #expect(error.code == "COMPUTER_ELEMENT_TARGET_MISMATCH")
     }
 }
+
+@Test func computerElementBehaviorLoopRequiresFreshReobservationAfterSemanticMutation() throws {
+    let runtime = ComputerProviderRuntime(browserAutomation: BrowserAutomationBroker { _, _, _ in
+        Issue.record("Legacy browser compatibility must not participate in Computer element behavior")
+        return BrowserAutomationCommandResult(status: 1)
+    })
+    let ax = AXUIElementCreateSystemWide()
+    let record = DesktopSessionRecord(
+        interactionId: "desk_behavior", pid: 321, bundleIdentifier: "com.example.Editor",
+        appName: "Editor", createdAt: Date(), lastObservedAt: Date(), snapshotRevision: 7
+    )
+    let session = DesktopSessionState(record: record)
+
+    func bindObservation(revision: Int) -> ComputerElementTarget {
+        let windowRef = "ax_\(revision)_1"
+        let elementRef = "ax_\(revision)_2"
+        session.elements[windowRef] = ax
+        session.elements[elementRef] = ax
+        session.elementWindowRefs[elementRef] = windowRef
+        session.record.snapshotRevision = revision
+        session.record.lastObservedAt = Date()
+        return ComputerElementTarget(
+            interactionId: session.record.interactionId,
+            pid: session.record.pid,
+            bundleIdentifier: session.record.bundleIdentifier,
+            appName: session.record.appName,
+            windowRef: windowRef,
+            snapshotRevision: revision
+        )
+    }
+
+    let initialTarget = bindObservation(revision: 7)
+    var observeCount = 0
+    let firstObservation = try runtime.execute(
+        ComputerExecuteParams(
+            capability: ComputerProviderProtocol.elementObserveCapability,
+            protocolVersion: ComputerProviderProtocol.elementProtocolVersion,
+            arguments: .object(["interactionId": .string("desk_behavior")])
+        ),
+        nativeAction: { _, _ in Issue.record("Unexpected native action"); return .null },
+        elementObserve: { _ in
+            observeCount += 1
+            return .object([
+                "ref": .string("ax_7_2"),
+                "snapshotRevision": .number(7),
+                "windowRef": .string("ax_7_1"),
+                "actions": .array([.string("invoke")]),
+                "boundsAreIdentity": .bool(false),
+            ])
+        },
+        elementAction: { _ in Issue.record("Unexpected element action during observe"); return .null }
+    )
+    #expect(firstObservation["ref"]?.stringValue == "ax_7_2")
+    #expect(firstObservation["windowRef"]?.stringValue == "ax_7_1")
+    #expect(firstObservation["actions"]?.arrayValue?.compactMap(\.stringValue) == ["invoke"])
+    #expect(firstObservation["boundsAreIdentity"]?.boolValue == false)
+
+    let action = try runtime.execute(
+        ComputerExecuteParams(
+            capability: ComputerProviderProtocol.elementActionCapability,
+            protocolVersion: ComputerProviderProtocol.elementProtocolVersion,
+            arguments: try JSONValue.encode(ComputerElementActionParams(
+                target: initialTarget, ref: "ax_7_2", action: "invoke"
+            ))
+        ),
+        nativeAction: { _, _ in Issue.record("Unexpected native action"); return .null },
+        elementObserve: { _ in Issue.record("Unexpected observe during action"); return .null },
+        elementAction: { _ in
+            try AccessibilityDriver.validateObservedTargetIdentity(
+                session: session, ref: "ax_7_2", target: initialTarget
+            )
+            PluginRuntime.retireObservedElementEpoch(session)
+            return .object(["semanticAction": .string("invoke")])
+        }
+    )
+    #expect(action["semanticAction"]?.stringValue == "invoke")
+    #expect(session.record.snapshotRevision == 8)
+    #expect(session.record.lastObservedAt == nil)
+    #expect(session.elements.isEmpty)
+    #expect(session.elementWindowRefs.isEmpty)
+
+    do {
+        try AccessibilityDriver.validateObservedTargetIdentity(
+            session: session, ref: "ax_7_2", target: initialTarget
+        )
+        Issue.record("Semantic mutation must retire the authorizing observation epoch")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ELEMENT_OBSERVATION_STALE")
+    }
+
+    let freshTarget = bindObservation(revision: 8)
+    let secondObservation = try runtime.execute(
+        ComputerExecuteParams(
+            capability: ComputerProviderProtocol.elementObserveCapability,
+            protocolVersion: ComputerProviderProtocol.elementProtocolVersion,
+            arguments: .object(["interactionId": .string("desk_behavior")])
+        ),
+        nativeAction: { _, _ in Issue.record("Unexpected native action"); return .null },
+        elementObserve: { _ in
+            observeCount += 1
+            try AccessibilityDriver.validateObservedTargetIdentity(
+                session: session, ref: "ax_8_2", target: freshTarget
+            )
+            return .object([
+                "ref": .string("ax_8_2"),
+                "snapshotRevision": .number(8),
+                "windowRef": .string("ax_8_1"),
+            ])
+        },
+        elementAction: { _ in Issue.record("Unexpected action during re-observe"); return .null }
+    )
+    #expect(observeCount == 2)
+    #expect(secondObservation["snapshotRevision"]?.intValue == 8)
+    #expect(secondObservation["ref"]?.stringValue == "ax_8_2")
+}
