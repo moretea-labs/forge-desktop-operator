@@ -4,11 +4,12 @@ final class ComputerProviderRuntime {
     typealias NativeActionExecutor = (_ action: String, _ arguments: JSONValue) throws -> JSONValue
     typealias ElementExecutor = (_ arguments: JSONValue) throws -> JSONValue
 
-    let browserAutomation: BrowserAutomationBroker
-    private let browserMutationLock = NSRecursiveLock()
+    /// Explicit migration-only bridge. It is not part of the Unified Computer capability advertisement.
+    private let legacyBrowserCompatibility: BrowserAutomationBroker
+    private let legacyBrowserMutationLock = NSRecursiveLock()
 
     init(browserAutomation: BrowserAutomationBroker) {
-        self.browserAutomation = browserAutomation
+        self.legacyBrowserCompatibility = browserAutomation
     }
 
     var capabilities: [ComputerCapabilityRuntimeDescriptor] {
@@ -30,12 +31,6 @@ final class ComputerProviderRuntime {
                 protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
                 method: ComputerProviderProtocol.executionMethod,
                 actions: ["desktop_screenshot"]
-            ),
-            ComputerCapabilityRuntimeDescriptor(
-                capabilityId: ComputerProviderProtocol.browserAutomationCapability,
-                protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
-                method: ComputerProviderProtocol.executionMethod,
-                actions: BrowserAutomationBroker.supportedActions
             ),
             ComputerCapabilityRuntimeDescriptor(
                 capabilityId: ComputerProviderProtocol.elementObserveCapability,
@@ -89,8 +84,6 @@ final class ComputerProviderRuntime {
                 )
             }
             return try elementAction(params.arguments)
-        case ComputerProviderProtocol.browserAutomationCapability:
-            return try executeBrowserAutomation(params.arguments)
         case ComputerProviderProtocol.observeCapability,
              ComputerProviderProtocol.inputCapability,
              ComputerProviderProtocol.captureCapability:
@@ -134,9 +127,9 @@ final class ComputerProviderRuntime {
     private func executeBrowserAutomation(_ params: JSONValue) throws -> JSONValue {
         let action = params["action"]?.stringValue
         if action == "metadata" || action == "list_tabs" || action == "capture_region" {
-            return try browserAutomation.execute(params: params)
+            return try legacyBrowserCompatibility.execute(params: params)
         }
-        guard browserMutationLock.try() else {
+        guard legacyBrowserMutationLock.try() else {
             throw PluginError(
                 code: "BROWSER_AUTOMATION_SERIALIZATION_BUSY",
                 message: "Another browser mutation is still in progress; retry instead of waiting inside the Unix-socket request.",
@@ -144,7 +137,7 @@ final class ComputerProviderRuntime {
                 domain: "browser"
             )
         }
-        defer { browserMutationLock.unlock() }
-        return try browserAutomation.execute(params: params)
+        defer { legacyBrowserMutationLock.unlock() }
+        return try legacyBrowserCompatibility.execute(params: params)
     }
 }

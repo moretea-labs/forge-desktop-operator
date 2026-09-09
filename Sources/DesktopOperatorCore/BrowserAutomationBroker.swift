@@ -330,18 +330,7 @@ final class BrowserAutomationBroker {
                 details: try? JSONValue.encode(DesktopPermissions.screenRecording(granted: false))
             )
         }
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("forge-browser-capture-\(ProcessInfo.processInfo.processIdentifier)-\(UUID().uuidString).png")
-        defer { try? FileManager.default.removeItem(at: path) }
-        let result = try runner(
-            "/usr/sbin/screencapture",
-            ["-x", "-R", "\(x),\(y),\(width),\(height)", path.path],
-            timeoutMs
-        )
-        guard result.status == 0 else {
-            throw failed(result.stderr.isEmpty ? "screencapture exited with status \(result.status)" : result.stderr)
-        }
-        let bytes = try Data(contentsOf: path)
+        let bytes = try ScreenshotDriver.captureRegionPNG(x: x, y: y, width: width, height: height)
         guard bytes.count <= Self.maxCaptureBytes else { throw invalid("BROWSER_AUTOMATION_CAPTURE_TOO_LARGE") }
         return bytes.base64EncodedString()
     }

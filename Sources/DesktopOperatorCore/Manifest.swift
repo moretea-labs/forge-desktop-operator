@@ -38,7 +38,6 @@ public struct PluginManifest: Codable, Equatable, Sendable {
             ComputerProviderProtocol.observeCapability,
             ComputerProviderProtocol.inputCapability,
             ComputerProviderProtocol.captureCapability,
-            ComputerProviderProtocol.browserAutomationCapability,
             ComputerProviderProtocol.elementObserveCapability,
             ComputerProviderProtocol.elementActionCapability
         ],

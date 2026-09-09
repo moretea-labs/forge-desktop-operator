@@ -13,7 +13,8 @@ public enum ComputerProviderProtocol {
     public static let observeCapability = "computer.observe.v1"
     public static let inputCapability = "computer.input.v1"
     public static let captureCapability = "computer.capture.v1"
-    public static let browserAutomationCapability = "computer.browser_automation.v1"
+    /// Compatibility marker only. Browser automation is no longer advertised through Unified Computer.
+    public static let browserAutomationCompatibilityCapability = "computer.browser_automation.v1"
 
     public static let elementObserveCapability = "computer.element.observe.v2"
     public static let elementActionCapability = "computer.element.action.v2"
@@ -36,14 +37,13 @@ public enum ComputerProviderProtocol {
         observeCapability,
         inputCapability,
         captureCapability,
-        browserAutomationCapability,
         elementObserveCapability,
         elementActionCapability,
     ]
 
     public static func expectedProtocolVersion(for capability: String) -> Int? {
         switch capability {
-        case observeCapability, inputCapability, captureCapability, browserAutomationCapability:
+        case observeCapability, inputCapability, captureCapability:
             return legacyProtocolVersion
         case elementObserveCapability, elementActionCapability:
             return elementProtocolVersion

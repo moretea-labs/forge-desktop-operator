@@ -3,55 +3,30 @@ import Foundation
 import Testing
 @testable import DesktopOperatorCore
 
-private struct PersistedSessionFixture: Codable {
-    let schemaVersion: Int
-    let sessions: [DesktopSessionRecord]
-}
-
-private func temporarySessionStorePath() throws -> String {
-    let root = FileManager.default.temporaryDirectory
-        .appendingPathComponent("forge-desktop-session-tests-\(UUID().uuidString)", isDirectory: true)
-    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-    return root.appendingPathComponent("desktop-sessions.json").path
-}
-
-@Test func desktopSessionStoreRestoresStableIdentityAndResetsEphemeralEvidence() throws {
-    let path = try temporarySessionStorePath()
-    defer { try? FileManager.default.removeItem(at: URL(fileURLWithPath: path).deletingLastPathComponent()) }
-    let original = DesktopSessionRecord(
-        interactionId: "desk_persisted",
-        pid: 42,
-        bundleIdentifier: "com.example.Editor",
-        appName: "Editor",
-        createdAt: Date(timeIntervalSince1970: 100),
-        lastObservedAt: Date(timeIntervalSince1970: 200),
-        snapshotRevision: 9
-    )
-    let fixture = PersistedSessionFixture(schemaVersion: 1, sessions: [original])
-    try JSONEncoder.repoHarness.encode(fixture).write(to: URL(fileURLWithPath: path), options: [.atomic])
-
-    let store = DesktopSessionStore(statePath: path) { record in
-        var rebound = record
-        rebound.pid = 84
-        rebound.lastObservedAt = nil
-        rebound.snapshotRevision = 0
-        return rebound
+@Test func desktopSessionStoreRestartDropsProviderBindings() throws {
+    guard let application = NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated }) else {
+        return
     }
-    let restored = try store.get("desk_persisted")
-    #expect(restored.record.interactionId == "desk_persisted")
-    #expect(restored.record.pid == 84)
-    #expect(restored.record.lastObservedAt == nil)
-    #expect(restored.record.snapshotRevision == 0)
-    #expect(restored.elements.isEmpty)
-    #expect(restored.lastVisualEvidence == nil)
+    let firstStore = DesktopSessionStore(applicationResolver: { $0 })
+    let state = try firstStore.create(application: application, reuseExisting: true)
+    state.visualRevision = 3
+    state.lastVisualEvidence = DesktopVisualEvidence(
+        revision: 3,
+        windowId: 123,
+        frame: DesktopFrame(x: 10, y: 20, width: 300, height: 200),
+        capturedAt: Date()
+    )
+    let interactionId = state.record.interactionId
 
-    try store.checkpoint(restored)
-    let restarted = DesktopSessionStore(statePath: path) { $0 }
-    #expect(try restarted.get("desk_persisted").record.pid == 84)
+    let restartedStore = DesktopSessionStore(applicationResolver: { $0 })
+    #expect(restartedStore.count == 0)
+    #expect(throws: PluginError.self) {
+        _ = try restartedStore.get(interactionId)
+    }
 }
 
-@Test func desktopSessionStoreReusePreservesFreshVisualEvidence() throws {
-    let store = DesktopSessionStore(statePath: nil) { $0 }
+@Test func desktopSessionStoreReusePreservesFreshInProcessVisualEvidence() throws {
+    let store = DesktopSessionStore(applicationResolver: { $0 })
     guard let application = NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated }) else {
         return
     }
@@ -71,19 +46,33 @@ private func temporarySessionStorePath() throws -> String {
     #expect(reused.lastVisualEvidence == evidence)
 }
 
-@Test func desktopSessionStoreFailsClosedOnCorruptPersistence() throws {
-    let path = try temporarySessionStorePath()
-    defer { try? FileManager.default.removeItem(at: URL(fileURLWithPath: path).deletingLastPathComponent()) }
-    try Data("{not-json".utf8).write(to: URL(fileURLWithPath: path), options: [.atomic])
-
-    let store = DesktopSessionStore(statePath: path) { $0 }
-    #expect(store.loadError != nil)
-    #expect(throws: PluginError.self) {
-        _ = try store.remove("desk_missing")
+@Test func desktopSessionStoreRebindsPidAndDropsEphemeralHandles() throws {
+    guard let application = NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated }) else {
+        return
     }
-    let health = PluginRuntime(socketPath: "/tmp/desktop-operator-session-store-test.sock", sessions: store).health()
-    #expect(health.state == "degraded")
-    #expect(health.warnings.contains { $0.contains("session persistence") })
+    var nextPid = application.processIdentifier
+    let store = DesktopSessionStore { record in
+        var rebound = record
+        rebound.pid = nextPid
+        return rebound
+    }
+    let state = try store.create(application: application, reuseExisting: false)
+    state.visualRevision = 7
+    state.lastVisualEvidence = DesktopVisualEvidence(
+        revision: 7,
+        windowId: 456,
+        frame: DesktopFrame(x: 0, y: 0, width: 100, height: 100),
+        capturedAt: Date()
+    )
+    nextPid = application.processIdentifier == Int32.max ? application.processIdentifier - 1 : application.processIdentifier + 1
+
+    let rebound = try store.get(state.record.interactionId)
+    #expect(rebound !== state)
+    #expect(rebound.record.pid == nextPid)
+    #expect(rebound.record.snapshotRevision == 0)
+    #expect(rebound.elements.isEmpty)
+    #expect(rebound.elementWindowRefs.isEmpty)
+    #expect(rebound.lastVisualEvidence == nil)
 }
 
 @Test func desktopSessionStableIdentityPrefersBundleIdentifier() {

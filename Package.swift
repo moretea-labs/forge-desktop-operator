@@ -16,7 +16,8 @@ let package = Package(
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
-                .linkedFramework("CoreGraphics")
+                .linkedFramework("CoreGraphics"),
+                .linkedFramework("ImageIO")
             ]
         ),
         .executableTarget(

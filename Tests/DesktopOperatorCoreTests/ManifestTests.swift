@@ -14,6 +14,7 @@ import Testing
     #expect(Set(json["actions"]?.arrayValue?.compactMap(\.stringValue) ?? []) == Set(PluginManifest.current.actions))
     #expect(Set(json["capabilities"]?.arrayValue?.compactMap(\.stringValue) ?? []) == Set(PluginManifest.current.capabilities))
     #expect(Set(ComputerProviderProtocol.allCapabilities).isSubset(of: Set(PluginManifest.current.capabilities)))
+    #expect(!PluginManifest.current.capabilities.contains(ComputerProviderProtocol.browserAutomationCompatibilityCapability))
     #expect(PluginManifest.current.name == "Forge Desktop Operator")
     #expect(PluginManifest.current.capabilities.contains("desktop.clipboard"))
     #expect(Set(["desktop_clipboard_read", "desktop_clipboard_write", "desktop_copy", "desktop_paste"]).isSubset(of: Set(PluginManifest.current.actions)))

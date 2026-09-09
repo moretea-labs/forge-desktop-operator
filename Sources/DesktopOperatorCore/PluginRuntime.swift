@@ -10,11 +10,11 @@ public final class PluginRuntime {
     private let computerProvider: ComputerProviderRuntime
     public private(set) var shutdownRequested = false
     public let socketPath: String
-    private let uiLock = NSRecursiveLock()
+    private let physicalInputLock = NSRecursiveLock()
 
     public init(
         socketPath: String = PluginPaths.defaultSocketPath,
-        sessions: DesktopSessionStore = DesktopSessionStore(statePath: nil)
+        sessions: DesktopSessionStore = DesktopSessionStore()
     ) {
         self.socketPath = socketPath
         self.computerProvider = ComputerProviderRuntime(browserAutomation: BrowserAutomationBroker())
@@ -24,7 +24,7 @@ public final class PluginRuntime {
     init(
         socketPath: String = PluginPaths.defaultSocketPath,
         browserAutomation: BrowserAutomationBroker,
-        sessions: DesktopSessionStore = DesktopSessionStore(statePath: nil)
+        sessions: DesktopSessionStore = DesktopSessionStore()
     ) {
         self.socketPath = socketPath
         self.computerProvider = ComputerProviderRuntime(browserAutomation: browserAutomation)
@@ -50,7 +50,6 @@ public final class PluginRuntime {
         var warnings: [String] = []
         if !accessibility.trusted { warnings.append("Accessibility permission is not granted") }
         if !ScreenshotDriver.screenRecordingGranted { warnings.append("Screen Recording permission is not granted") }
-        if let loadError = sessions.loadError { warnings.append("Desktop session persistence is unavailable: \(loadError)") }
         return HealthResult(
             state: warnings.isEmpty ? "ready" : "degraded",
             checkedAt: Date(),
@@ -83,7 +82,7 @@ public final class PluginRuntime {
                 "applications": .array(ApplicationDriver.runningApplicationSummaries(limit: object["limit"]?.intValue ?? 100))
             ] as [String: JSONValue])
         case "desktop_permissions_request":
-            return try withUILock {
+            return try withPhysicalInputLock {
                 let values = object["services"]?.arrayValue ?? [.string("accessibility"), .string("screen_recording")]
                 guard !values.isEmpty, values.count <= 2 else {
                     throw PluginError.invalidArguments("desktop_permissions_request supports 1 or 2 services")
@@ -132,7 +131,7 @@ public final class PluginRuntime {
                 }
                 return try JSONValue.encode(self.sessions.create(application: application, reuseExisting: reuseExisting).record)
             }
-            return try launch ? withUILock(openSession) : openSession()
+            return try activate ? withPhysicalInputLock(openSession) : openSession()
         case "desktop_observe":
             let session = try session(from: object)
             let rootSelector = object["root_selector"] == nil ? nil : try parseSelector(object["root_selector"])
@@ -157,22 +156,23 @@ public final class PluginRuntime {
                     "windows": try JSONValue.encode(windows)
                 ])
             }
-            try sessions.checkpoint(session)
             return result
         case "desktop_press":
             let session = try session(from: object)
             let selector = try parseSelector(object["selector"])
-            return try withUILock {
+            let forceCoordinate = object["force_coordinate"]?.boolValue ?? false
+            let perform: () throws -> JSONValue = {
                 try session.withLock {
-                    try accessibility.press(
+                    try self.accessibility.press(
                         session: session,
                         selector: selector,
                         coordinateFallback: object["coordinate_fallback"]?.boolValue ?? false,
-                        forceCoordinate: object["force_coordinate"]?.boolValue ?? false,
+                        forceCoordinate: forceCoordinate,
                         semanticAction: object["semantic_action"]?.stringValue ?? "press"
                     )
                 }
             }
+            return try forceCoordinate ? withPhysicalInputLock(perform) : perform()
         case "desktop_select_rows":
             let session = try session(from: object)
             let selector = try parseSelector(object["selector"])
@@ -180,23 +180,13 @@ public final class PluginRuntime {
                 throw PluginError.invalidArguments("desktop_select_rows requires start_index")
             }
             let endIndex = object["end_index"]?.intValue
-            return try withUILock {
-                try session.withLock {
-                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
-                        throw PluginError(
-                            code: "BACKGROUND_SAFE_ROW_SELECTION_UNAVAILABLE",
-                            message: "Row selection requires the target application to already be foreground; Forge Desktop Operator will not activate it automatically.",
-                            retryable: true,
-                            domain: "accessibility"
-                        )
-                    }
-                    return try accessibility.selectRows(
-                        session: session,
-                        selector: selector,
-                        startIndex: startIndex,
-                        endIndex: endIndex
-                    )
-                }
+            return try session.withLock {
+                try accessibility.selectRows(
+                    session: session,
+                    selector: selector,
+                    startIndex: startIndex,
+                    endIndex: endIndex
+                )
             }
         case "desktop_pointer_click":
             let session = try session(from: object)
@@ -210,7 +200,7 @@ public final class PluginRuntime {
             guard ["left", "middle", "right"].contains(button) else {
                 throw PluginError.invalidArguments("desktop_pointer_click button must be left, middle, or right")
             }
-            return try withUILock {
+            return try withPhysicalInputLock {
                 try session.withLock {
                     guard ApplicationDriver.isActive(pid: session.record.pid) else {
                         throw PluginError(
@@ -250,10 +240,8 @@ public final class PluginRuntime {
             let session = try session(from: object)
             let selector = try parseSelector(object["selector"])
             guard let text = object["text"]?.stringValue else { throw PluginError.invalidArguments("desktop_type_text requires text") }
-            return try withUILock {
-                try session.withLock {
-                    try accessibility.typeText(session: session, selector: selector, text: text, replaceExisting: object["replace"]?.boolValue ?? true)
-                }
+            return try session.withLock {
+                try accessibility.typeText(session: session, selector: selector, text: text, replaceExisting: object["replace"]?.boolValue ?? true)
             }
         case "desktop_key":
             guard let values = object["keys"]?.arrayValue else { throw PluginError.invalidArguments("desktop_key requires keys") }
@@ -265,7 +253,7 @@ public final class PluginRuntime {
                 throw PluginError(code: "DESKTOP_KEY_REQUIRES_INTERACTION_ID", message: "Silent key input requires an explicit desktop session and never targets the user's current foreground app implicitly.", retryable: false, domain: "input")
             }
             let session = try sessions.get(interactionId)
-            return try withUILock {
+            return try withPhysicalInputLock {
                 try session.withLock {
                     guard ApplicationDriver.isActive(pid: session.record.pid) else {
                         throw PluginError(code: "BACKGROUND_SAFE_KEY_INPUT_UNAVAILABLE", message: "Synthetic key events require the target application to already be foreground; Forge Desktop Operator will not activate it automatically.", retryable: true, domain: "input")
@@ -288,7 +276,7 @@ public final class PluginRuntime {
         case "desktop_copy":
             guard let interactionId = object["interaction_id"]?.stringValue else { throw PluginError.invalidArguments("desktop_copy requires interaction_id") }
             let session = try sessions.get(interactionId)
-            return try withUILock {
+            return try withPhysicalInputLock {
                 try session.withLock {
                     guard ApplicationDriver.isActive(pid: session.record.pid) else {
                         throw PluginError(code: "BACKGROUND_SAFE_COPY_UNAVAILABLE", message: "Copy requires the target application to already be foreground; silent mode will not activate it.", retryable: true, domain: "input")
@@ -300,7 +288,7 @@ public final class PluginRuntime {
         case "desktop_paste":
             guard let interactionId = object["interaction_id"]?.stringValue else { throw PluginError.invalidArguments("desktop_paste requires interaction_id") }
             let session = try sessions.get(interactionId)
-            return try withUILock {
+            return try withPhysicalInputLock {
                 try session.withLock {
                     guard ApplicationDriver.isActive(pid: session.record.pid) else {
                         throw PluginError(code: "BACKGROUND_SAFE_PASTE_UNAVAILABLE", message: "Paste requires the target application to already be foreground; silent mode will not activate it.", retryable: true, domain: "input")
@@ -311,7 +299,7 @@ public final class PluginRuntime {
             }
         case "desktop_open_url":
             guard let url = object["url"]?.stringValue else { throw PluginError.invalidArguments("desktop_open_url requires url") }
-            return try withUILock {
+            return try withPhysicalInputLock {
                 try ApplicationDriver.openURL(url)
                 return .object(["opened": .string(url)])
             }
@@ -349,7 +337,7 @@ public final class PluginRuntime {
             }
             return try JSONValue.encode(ScreenshotDriver.capture(scope: scope, windowId: windowId, label: object["label"]?.stringValue))
         case "desktop_batch":
-            return try withUILock { try executeBatch(object) }
+            return try executeBatch(object)
         case "desktop_session_close":
             guard let interactionId = object["interaction_id"]?.stringValue else { throw PluginError.invalidArguments("desktop_session_close requires interaction_id") }
             return .object(["closed": .bool(try sessions.remove(interactionId)), "interaction_id": .string(interactionId)])
@@ -407,9 +395,9 @@ public final class PluginRuntime {
     }
 
 
-    private func withUILock<T>(_ body: () throws -> T) rethrows -> T {
-        uiLock.lock()
-        defer { uiLock.unlock() }
+    private func withPhysicalInputLock<T>(_ body: () throws -> T) rethrows -> T {
+        physicalInputLock.lock()
+        defer { physicalInputLock.unlock() }
         return try body()
     }
 
@@ -497,33 +485,29 @@ public final class PluginRuntime {
                 rootSelector: params.rootSelector
             )
         }
-        try sessions.checkpoint(session)
         return try JSONValue.encode(snapshot)
     }
 
     private func executeComputerElementAction(_ arguments: JSONValue) throws -> JSONValue {
         let params = try decode(ComputerElementActionParams.self, from: arguments)
         let session = try sessions.get(params.target.interactionId)
-        let result = try withUILock {
-            try session.withLock {
-                let result = try accessibility.performElementAction(
-                    session: session,
-                    ref: params.ref,
-                    target: params.target,
-                    action: params.action,
-                    value: params.value
-                )
-                // Any successful semantic mutation retires the observation that authorized it.
-                // Reusing the same provider-local element ref after UI state may have changed is unsafe.
-                session.elements.removeAll(keepingCapacity: false)
-                session.elementWindowRefs.removeAll(keepingCapacity: false)
-                session.lastRootElement = nil
-                session.record.snapshotRevision += 1
-                session.record.lastObservedAt = nil
-                return result
-            }
+        let result = try session.withLock {
+            let result = try accessibility.performElementAction(
+                session: session,
+                ref: params.ref,
+                target: params.target,
+                action: params.action,
+                value: params.value
+            )
+            // Any successful semantic mutation retires the observation that authorized it.
+            // Reusing the same provider-local element ref after UI state may have changed is unsafe.
+            session.elements.removeAll(keepingCapacity: false)
+            session.elementWindowRefs.removeAll(keepingCapacity: false)
+            session.lastRootElement = nil
+            session.record.snapshotRevision += 1
+            session.record.lastObservedAt = nil
+            return result
         }
-        try sessions.checkpoint(session)
         return result
     }
 

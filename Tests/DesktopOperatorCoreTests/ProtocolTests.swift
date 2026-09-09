@@ -21,10 +21,7 @@ import Testing
     #expect(response.result?["protocolVersion"]?.stringValue == "1.0")
     let computerCapabilities = response.result?["computerCapabilities"]?.arrayValue ?? []
     #expect(Set(computerCapabilities.compactMap { $0["capabilityId"]?.stringValue }) == Set(ComputerProviderProtocol.allCapabilities))
-    let browserCapability = computerCapabilities.first { $0["capabilityId"]?.stringValue == ComputerProviderProtocol.browserAutomationCapability }
-    #expect(browserCapability?["method"]?.stringValue == ComputerProviderProtocol.executionMethod)
-    #expect(browserCapability?["protocolVersion"]?.intValue == ComputerProviderProtocol.protocolVersion)
-    #expect(Set(browserCapability?["actions"]?.arrayValue?.compactMap(\.stringValue) ?? []) == Set(BrowserAutomationBroker.supportedActions))
+    #expect(!computerCapabilities.contains { $0["capabilityId"]?.stringValue == ComputerProviderProtocol.browserAutomationCompatibilityCapability })
     #expect(response.result?["internalCapabilities"]?.arrayValue?.compactMap(\.stringValue).contains("macos_browser_automation.v1") == true)
     #expect(response.result?["browserAutomationProtocolVersion"]?.intValue == 1)
     #expect(response.result?["browserAutomationActions"]?.arrayValue?.compactMap(\.stringValue).contains("list_tabs") == true)
@@ -341,5 +338,22 @@ private func pointerTestWindow(frame: DesktopFrame, onScreen: Bool = true) -> De
         #expect(error.code == "POINTER_CLICK_STALE_VISUAL_REVISION")
     } catch {
         Issue.record("Unexpected error: \(error)")
+    }
+}
+
+
+@Test func rowSelectionRangeSupportsBackgroundSemanticSelectionBounds() throws {
+    #expect(try AccessibilityDriver.rowSelectionRange(rowCount: 5, startIndex: 1, endIndex: 3) == 1...3)
+    #expect(try AccessibilityDriver.rowSelectionRange(rowCount: 5, startIndex: 2, endIndex: nil) == 2...4)
+    #expect(throws: PluginError.self) {
+        _ = try AccessibilityDriver.rowSelectionRange(rowCount: 5, startIndex: 4, endIndex: 2)
+    }
+}
+
+@Test func nativeCaptureTargetRequiresExactWindowIdentityWithoutActivationSemantics() throws {
+    #expect(try ScreenshotDriver.resolveCaptureTarget(scope: "window", windowId: 77) == .window(77))
+    #expect(try ScreenshotDriver.resolveCaptureTarget(scope: "display", windowId: nil) == .display)
+    #expect(throws: PluginError.self) {
+        _ = try ScreenshotDriver.resolveCaptureTarget(scope: "window", windowId: nil)
     }
 }

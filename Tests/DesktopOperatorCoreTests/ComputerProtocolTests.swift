@@ -3,29 +3,29 @@ import ApplicationServices
 import Testing
 @testable import DesktopOperatorCore
 
-@Test func computerExecuteRoutesBrowserAutomationThroughProviderNeutralCapability() throws {
+@Test func computerExecuteDoesNotAdvertiseOrRouteLegacyBrowserCompatibilityAsUnifiedComputer() throws {
     var calls = 0
     let broker = BrowserAutomationBroker { _, _, _ in
         calls += 1
-        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}Example\u{1e}0\u{1e}0\u{1e}800\u{1e}600")
+        return BrowserAutomationCommandResult(status: 0, stdout: "ok")
     }
     let runtime = PluginRuntime(browserAutomation: broker)
+    let health = runtime.health()
+    #expect(!health.computerCapabilities.contains { $0.capabilityId == ComputerProviderProtocol.browserAutomationCompatibilityCapability })
+
     let response = runtime.handle(RPCRequest(
-        id: "computer-browser-metadata",
+        id: "computer-browser-compatibility-not-unified",
         method: ComputerProviderProtocol.executionMethod,
         params: try JSONValue.encode(ComputerExecuteParams(
-            capability: ComputerProviderProtocol.browserAutomationCapability,
-            protocolVersion: ComputerProviderProtocol.protocolVersion,
-            arguments: .object([
-                "action": .string("metadata"),
-                "product": .string("chrome"),
-                "timeoutMs": .number(1_000),
-            ])
+            capability: ComputerProviderProtocol.browserAutomationCompatibilityCapability,
+            protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
+            arguments: .object(["action": .string("metadata")])
         ))
     ))
 
-    #expect(response.ok)
-    #expect(calls == 1)
+    #expect(!response.ok)
+    #expect(response.error?.code == "COMPUTER_CAPABILITY_UNSUPPORTED")
+    #expect(calls == 0)
 }
 
 @Test func computerExecuteRejectsUnknownCapabilityBeforeNativeDispatch() throws {
@@ -59,9 +59,9 @@ import Testing
         id: "computer-version-mismatch",
         method: ComputerProviderProtocol.executionMethod,
         params: try JSONValue.encode(ComputerExecuteParams(
-            capability: ComputerProviderProtocol.browserAutomationCapability,
+            capability: ComputerProviderProtocol.elementObserveCapability,
             protocolVersion: 999,
-            arguments: .object(["action": .string("metadata"), "product": .string("chrome")])
+            arguments: .object(["interactionId": .string("desk_version_test")])
         ))
     ))
 

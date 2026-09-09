@@ -40,27 +40,19 @@ public final class DesktopSessionState {
     }
 }
 
+/// Process-local provider bindings only. Forge owns durable Computer target/session authority.
+/// Restart intentionally drops every interaction id, AX handle and visual evidence binding.
 public final class DesktopSessionStore {
-    private struct PersistedStore: Codable {
-        let schemaVersion: Int
-        let sessions: [DesktopSessionRecord]
-    }
-
     public typealias ApplicationResolver = (DesktopSessionRecord) -> DesktopSessionRecord?
 
     private var sessions: [String: DesktopSessionState] = [:]
     private let lock = NSLock()
-    private let statePath: String?
     private let applicationResolver: ApplicationResolver
-    public private(set) var loadError: String?
 
     public init(
-        statePath: String? = PluginPaths.sessionStorePath,
         applicationResolver: @escaping ApplicationResolver = DesktopSessionStore.resolveLiveApplication
     ) {
-        self.statePath = statePath
         self.applicationResolver = applicationResolver
-        loadPersistedSessions()
     }
 
     public var count: Int {
@@ -72,7 +64,6 @@ public final class DesktopSessionStore {
         guard !application.isTerminated else {
             throw PluginError(code: "APP_TERMINATED", message: "The selected application is no longer running", retryable: true)
         }
-        try assertWritable()
         lock.lock()
         defer { lock.unlock() }
         if reuseExisting, let existing = reusableSessionLocked(application: application) {
@@ -82,7 +73,6 @@ public final class DesktopSessionStore {
                 existing.elementWindowRefs.removeAll(keepingCapacity: false)
                 existing.lastRootElement = nil
             }
-            try persistLocked()
             return existing
         }
         let id = "desk_\(UUID().uuidString.lowercased())"
@@ -97,7 +87,6 @@ public final class DesktopSessionStore {
         )
         let state = DesktopSessionState(record: record)
         sessions[id] = state
-        try persistLocked()
         return state
     }
 
@@ -105,13 +94,13 @@ public final class DesktopSessionStore {
         lock.lock()
         defer { lock.unlock() }
         guard let state = sessions[id] else {
-            throw PluginError(code: "SESSION_NOT_FOUND", message: "Desktop session \(id) was not found", retryable: false, domain: "session")
+            throw PluginError(code: "SESSION_NOT_FOUND", message: "Desktop provider binding \(id) was not found; rebind through Forge after provider restart", retryable: true, domain: "session")
         }
         let current = state.withLock { state.record }
         guard let rebound = applicationResolver(current) else {
             throw PluginError(
                 code: "SESSION_TARGET_NOT_RUNNING",
-                message: "Desktop session \(id) is retained, but its application is not currently running",
+                message: "Desktop provider binding \(id) targets an application that is no longer running",
                 retryable: true,
                 domain: "session"
             )
@@ -119,7 +108,6 @@ public final class DesktopSessionStore {
         if rebound.pid != current.pid {
             let replacement = restoredState(from: rebound)
             sessions[id] = replacement
-            try persistLocked()
             return replacement
         }
         return state
@@ -127,20 +115,9 @@ public final class DesktopSessionStore {
 
     @discardableResult
     public func remove(_ id: String) throws -> Bool {
-        try assertWritable()
         lock.lock()
         defer { lock.unlock() }
-        let removed = sessions.removeValue(forKey: id) != nil
-        if removed { try persistLocked() }
-        return removed
-    }
-
-    public func checkpoint(_ state: DesktopSessionState) throws {
-        try assertWritable()
-        lock.lock()
-        defer { lock.unlock() }
-        guard sessions[state.record.interactionId] === state else { return }
-        try persistLocked()
+        return sessions.removeValue(forKey: id) != nil
     }
 
     public func records() -> [DesktopSessionRecord] {
@@ -193,47 +170,5 @@ public final class DesktopSessionStore {
         reset.lastObservedAt = nil
         reset.snapshotRevision = 0
         return DesktopSessionState(record: reset)
-    }
-
-    private func loadPersistedSessions() {
-        guard let statePath, FileManager.default.fileExists(atPath: statePath) else { return }
-        do {
-            let data = try Data(contentsOf: URL(fileURLWithPath: statePath))
-            let persisted = try JSONDecoder.repoHarness.decode(PersistedStore.self, from: data)
-            guard persisted.schemaVersion == 1, persisted.sessions.count <= 500 else {
-                throw PluginError(code: "SESSION_STORE_SCHEMA_UNSUPPORTED", message: "Desktop session store schema or size is unsupported", domain: "session")
-            }
-            for record in persisted.sessions {
-                guard record.interactionId.hasPrefix("desk_"), !record.appName.isEmpty else {
-                    throw PluginError(code: "SESSION_STORE_CORRUPT", message: "Desktop session store contains an invalid record", domain: "session")
-                }
-                let reconciled = applicationResolver(record) ?? record
-                sessions[record.interactionId] = restoredState(from: reconciled)
-            }
-        } catch {
-            sessions.removeAll()
-            loadError = (error as? PluginError)?.message ?? error.localizedDescription
-        }
-    }
-
-    private func assertWritable() throws {
-        if let loadError {
-            throw PluginError(
-                code: "SESSION_STORE_UNAVAILABLE",
-                message: "Desktop session persistence is unavailable until the corrupt store is repaired: \(loadError)",
-                retryable: false,
-                domain: "session"
-            )
-        }
-    }
-
-    private func persistLocked() throws {
-        guard let statePath else { return }
-        let directory = URL(fileURLWithPath: statePath).deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        let records = sessions.values.map { state in state.withLock { state.record } }.sorted { $0.createdAt < $1.createdAt }
-        let data = try JSONEncoder.repoHarness.encode(PersistedStore(schemaVersion: 1, sessions: records))
-        try data.write(to: URL(fileURLWithPath: statePath), options: [.atomic])
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: statePath)
     }
 }

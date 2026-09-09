@@ -448,6 +448,20 @@ public final class AccessibilityDriver {
         }
     }
 
+
+    static func rowSelectionRange(rowCount: Int, startIndex: Int, endIndex: Int?) throws -> ClosedRange<Int> {
+        guard rowCount > 0 else {
+            throw PluginError(code: "AX_SELECTED_ROWS_UNAVAILABLE", message: "Selected Accessibility element does not expose rows.", retryable: false, domain: "accessibility")
+        }
+        let resolvedEnd = endIndex ?? (rowCount - 1)
+        guard startIndex >= 0, startIndex < rowCount, resolvedEnd >= startIndex, resolvedEnd < rowCount else {
+            throw PluginError.invalidArguments(
+                "desktop_select_rows range must be inside 0..<\(rowCount) and end_index must not precede start_index"
+            )
+        }
+        return startIndex...resolvedEnd
+    }
+
     public func selectRows(
         session: DesktopSessionState,
         selector: ElementSelector,
@@ -467,12 +481,12 @@ public final class AccessibilityDriver {
                 domain: "accessibility"
             )
         }
-        let resolvedEnd = endIndex ?? (rows.count - 1)
-        guard startIndex >= 0, startIndex < rows.count, resolvedEnd >= startIndex, resolvedEnd < rows.count else {
-            throw PluginError.invalidArguments(
-                "desktop_select_rows range must be inside 0..<\(rows.count) and end_index must not precede start_index"
-            )
-        }
+        let selectionRange = try Self.rowSelectionRange(
+            rowCount: rows.count,
+            startIndex: startIndex,
+            endIndex: endIndex
+        )
+        let resolvedEnd = selectionRange.upperBound
 
         var settable = DarwinBoolean(false)
         let settableResult = AXUIElementIsAttributeSettable(
@@ -489,7 +503,7 @@ public final class AccessibilityDriver {
             )
         }
 
-        let selectedRows = Array(rows[startIndex...resolvedEnd])
+        let selectedRows = Array(rows[selectionRange])
         let setResult = AXUIElementSetAttributeValue(
             element,
             kAXSelectedRowsAttribute as CFString,
