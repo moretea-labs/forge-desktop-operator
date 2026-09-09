@@ -173,6 +173,31 @@ public final class PluginRuntime {
                     )
                 }
             }
+        case "desktop_select_rows":
+            let session = try session(from: object)
+            let selector = try parseSelector(object["selector"])
+            guard let startIndex = object["start_index"]?.intValue else {
+                throw PluginError.invalidArguments("desktop_select_rows requires start_index")
+            }
+            let endIndex = object["end_index"]?.intValue
+            return try withUILock {
+                try session.withLock {
+                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                        throw PluginError(
+                            code: "BACKGROUND_SAFE_ROW_SELECTION_UNAVAILABLE",
+                            message: "Row selection requires the target application to already be foreground; Forge Desktop Operator will not activate it automatically.",
+                            retryable: true,
+                            domain: "accessibility"
+                        )
+                    }
+                    return try accessibility.selectRows(
+                        session: session,
+                        selector: selector,
+                        startIndex: startIndex,
+                        endIndex: endIndex
+                    )
+                }
+            }
         case "desktop_pointer_click":
             let session = try session(from: object)
             let windowId = try requiredWindowId(object["window_id"], name: "window_id")
@@ -181,6 +206,10 @@ public final class PluginRuntime {
             }
             let x = try requiredNumber(object["x"], name: "x")
             let y = try requiredNumber(object["y"], name: "y")
+            let button = object["button"]?.stringValue?.lowercased() ?? "left"
+            guard ["left", "middle", "right"].contains(button) else {
+                throw PluginError.invalidArguments("desktop_pointer_click button must be left, middle, or right")
+            }
             return try withUILock {
                 try session.withLock {
                     guard ApplicationDriver.isActive(pid: session.record.pid) else {
@@ -204,10 +233,11 @@ public final class PluginRuntime {
                     guard immediateWindow?.onScreen == true, immediateWindow?.frame == validatedFrame else {
                         throw PluginError(code: "POINTER_CLICK_WINDOW_CHANGED", message: "Target window changed after validation; capture a fresh window screenshot before clicking.", retryable: true, domain: "input")
                     }
-                    try InputDriver.click(x: x, y: y)
+                    try InputDriver.click(x: x, y: y, button: button, clickCount: 1)
                     return .object([
                         "clicked": .bool(true),
                         "method": .string("CGEvent_pointer"),
+                        "button": .string(button),
                         "interaction_id": .string(session.record.interactionId),
                         "window_id": .number(Double(windowId)),
                         "visual_revision": .number(Double(visualRevision)),

@@ -78,8 +78,6 @@ public final class DesktopSessionStore {
                 existing.record.pid = application.processIdentifier
                 existing.elements.removeAll(keepingCapacity: false)
                 existing.lastRootElement = nil
-                existing.visualRevision = 0
-                existing.lastVisualEvidence = nil
             }
             try persistLocked()
             return existing

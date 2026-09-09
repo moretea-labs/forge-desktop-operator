@@ -79,6 +79,15 @@ import Testing
     #expect(down.method == "AXScrollDownByPage_background")
     #expect(down.isScroll)
 
+    #expect(AccessibilityDriver.disclosureValue(for: "expand") == true)
+    #expect(AccessibilityDriver.disclosureValue(for: "collapse") == false)
+    #expect(AccessibilityDriver.disclosureValue(for: "press") == nil)
+
+    #expect(AccessibilityDriver.openFallbackAction(semanticAction: "open", primaryResult: .actionUnsupported, availableActions: ["AXShowDefaultUI"]) == "AXShowDefaultUI")
+    #expect(AccessibilityDriver.openFallbackAction(semanticAction: "open", primaryResult: .attributeUnsupported, availableActions: ["AXShowDefaultUI"]) == "AXShowDefaultUI")
+    #expect(AccessibilityDriver.openFallbackAction(semanticAction: "open", primaryResult: .cannotComplete, availableActions: ["AXShowDefaultUI"]) == nil)
+    #expect(AccessibilityDriver.openFallbackAction(semanticAction: "press", primaryResult: .actionUnsupported, availableActions: ["AXShowDefaultUI"]) == nil)
+
     let up = try AccessibilityDriver.semanticAccessibilityAction("scroll_up_page")
     #expect(up.action as String == "AXScrollUpByPage")
     #expect(up.method == "AXScrollUpByPage_background")

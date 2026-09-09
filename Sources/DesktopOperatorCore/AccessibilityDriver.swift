@@ -110,6 +110,22 @@ public final class AccessibilityDriver {
                 "snapshot_revision": .number(Double(session.record.snapshotRevision))
             ])
         }
+        if let disclosureValue = Self.disclosureValue(for: semanticAction) {
+            return try setDisclosure(
+                element: element,
+                expanded: disclosureValue,
+                semanticAction: semanticAction,
+                snapshotRevision: session.record.snapshotRevision
+            )
+        }
+        if semanticAction == "open", isOutlineRow(element), Self.isDisclosureSettable(element) {
+            return try setDisclosure(
+                element: element,
+                expanded: true,
+                semanticAction: semanticAction,
+                snapshotRevision: session.record.snapshotRevision
+            )
+        }
         let semantic = try Self.semanticAccessibilityAction(semanticAction)
         var result = AXUIElementPerformAction(element, semantic.action)
         if result == .cannotComplete {
@@ -122,6 +138,25 @@ public final class AccessibilityDriver {
                 "semantic_action": .string(semanticAction),
                 "snapshot_revision": .number(Double(session.record.snapshotRevision))
             ])
+        }
+        if let fallbackAction = Self.openFallbackAction(
+            semanticAction: semanticAction,
+            primaryResult: result,
+            availableActions: actionNames(of: element)
+        ) {
+            var fallbackResult = AXUIElementPerformAction(element, fallbackAction as CFString)
+            if fallbackResult == .cannotComplete {
+                Thread.sleep(forTimeInterval: 0.15)
+                fallbackResult = AXUIElementPerformAction(element, fallbackAction as CFString)
+            }
+            if fallbackResult == .success {
+                return .object([
+                    "method": .string("AXShowDefaultUI_background"),
+                    "semantic_action": .string(semanticAction),
+                    "snapshot_revision": .number(Double(session.record.snapshotRevision))
+                ])
+            }
+            result = fallbackResult
         }
         if semantic.isScroll, result == .actionUnsupported {
             throw PluginError(
@@ -149,6 +184,84 @@ public final class AccessibilityDriver {
         )
     }
 
+    static func openFallbackAction(semanticAction: String, primaryResult: AXError, availableActions: [String]) -> String? {
+        guard semanticAction == "open", (primaryResult == .actionUnsupported || primaryResult == .attributeUnsupported) else { return nil }
+        return availableActions.contains("AXShowDefaultUI") ? "AXShowDefaultUI" : nil
+    }
+
+    private func isOutlineRow(_ element: AXUIElement) -> Bool {
+        stringAttribute(element, kAXRoleAttribute as CFString) == kAXRowRole as String
+    }
+
+    private static func isDisclosureSettable(_ element: AXUIElement) -> Bool {
+        var settable = DarwinBoolean(false)
+        let result = AXUIElementIsAttributeSettable(
+            element,
+            kAXDisclosingAttribute as CFString,
+            &settable
+        )
+        return result == .success && settable.boolValue
+    }
+
+    static func disclosureValue(for semanticAction: String) -> Bool? {
+        switch semanticAction {
+        case "expand": return true
+        case "collapse": return false
+        default: return nil
+        }
+    }
+
+    private func setDisclosure(
+        element: AXUIElement,
+        expanded: Bool,
+        semanticAction: String,
+        snapshotRevision: Int
+    ) throws -> JSONValue {
+        var settable = DarwinBoolean(false)
+        let settableResult = AXUIElementIsAttributeSettable(
+            element,
+            kAXDisclosingAttribute as CFString,
+            &settable
+        )
+        guard settableResult == .success, settable.boolValue else {
+            throw PluginError(
+                code: "AX_DISCLOSING_NOT_SETTABLE",
+                message: "Selected Accessibility element does not allow AXDisclosing to be changed.",
+                retryable: settableResult == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+
+        let value: CFBoolean = expanded ? kCFBooleanTrue : kCFBooleanFalse
+        var result = AXUIElementSetAttributeValue(
+            element,
+            kAXDisclosingAttribute as CFString,
+            value
+        )
+        if result == .cannotComplete {
+            Thread.sleep(forTimeInterval: 0.15)
+            result = AXUIElementSetAttributeValue(
+                element,
+                kAXDisclosingAttribute as CFString,
+                value
+            )
+        }
+        guard result == .success else {
+            throw PluginError(
+                code: "AX_DISCLOSING_SET_FAILED",
+                message: "Could not set AXDisclosing; Accessibility returned code \(result.rawValue).",
+                retryable: result == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+        return .object([
+            "method": .string("AXDisclosing_set"),
+            "semantic_action": .string(semanticAction),
+            "expanded": .bool(expanded),
+            "snapshot_revision": .number(Double(snapshotRevision))
+        ])
+    }
+
     static func semanticAccessibilityAction(_ semanticAction: String) throws -> (action: CFString, method: String, isScroll: Bool) {
         switch semanticAction {
         case "press":
@@ -166,7 +279,7 @@ public final class AccessibilityDriver {
         case "scroll_up_page":
             return ("AXScrollUpByPage" as CFString, "AXScrollUpByPage_background", true)
         default:
-            throw PluginError.invalidArguments("desktop_press semantic_action must be press, show_menu, pick, open, confirm, scroll_down_page, or scroll_up_page")
+            throw PluginError.invalidArguments("desktop_press semantic_action must be press, show_menu, pick, open, confirm, expand, collapse, scroll_down_page, or scroll_up_page")
         }
     }
 
@@ -207,6 +320,71 @@ public final class AccessibilityDriver {
             let bounds = CGDisplayBounds(display)
             return DesktopFrame(x: bounds.origin.x, y: bounds.origin.y, width: bounds.width, height: bounds.height)
         }
+    }
+
+    public func selectRows(
+        session: DesktopSessionState,
+        selector: ElementSelector,
+        startIndex: Int,
+        endIndex: Int? = nil
+    ) throws -> JSONValue {
+        let element = try resolveElement(session: session, selector: selector)
+        prepare(element)
+        let rows = children(of: element).filter {
+            stringAttribute($0, kAXRoleAttribute as CFString) == kAXRowRole as String
+        }
+        guard !rows.isEmpty else {
+            throw PluginError(
+                code: "AX_SELECTED_ROWS_UNAVAILABLE",
+                message: "Selected Accessibility element does not expose rows.",
+                retryable: false,
+                domain: "accessibility"
+            )
+        }
+        let resolvedEnd = endIndex ?? (rows.count - 1)
+        guard startIndex >= 0, startIndex < rows.count, resolvedEnd >= startIndex, resolvedEnd < rows.count else {
+            throw PluginError.invalidArguments(
+                "desktop_select_rows range must be inside 0..<\(rows.count) and end_index must not precede start_index"
+            )
+        }
+
+        var settable = DarwinBoolean(false)
+        let settableResult = AXUIElementIsAttributeSettable(
+            element,
+            kAXSelectedRowsAttribute as CFString,
+            &settable
+        )
+        guard settableResult == .success, settable.boolValue else {
+            throw PluginError(
+                code: "AX_SELECTED_ROWS_NOT_SETTABLE",
+                message: "Selected Accessibility element does not allow AXSelectedRows to be changed.",
+                retryable: false,
+                domain: "accessibility"
+            )
+        }
+
+        let selectedRows = Array(rows[startIndex...resolvedEnd])
+        let setResult = AXUIElementSetAttributeValue(
+            element,
+            kAXSelectedRowsAttribute as CFString,
+            selectedRows as CFArray
+        )
+        guard setResult == .success else {
+            throw PluginError(
+                code: "AX_SELECTED_ROWS_SET_FAILED",
+                message: "Could not set AXSelectedRows; Accessibility returned code \(setResult.rawValue).",
+                retryable: setResult == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+
+        return .object([
+            "row_count": .number(Double(rows.count)),
+            "selected_count": .number(Double(selectedRows.count)),
+            "start_index": .number(Double(startIndex)),
+            "end_index": .number(Double(resolvedEnd)),
+            "snapshot_revision": .number(Double(session.record.snapshotRevision))
+        ])
     }
 
     public func typeText(session: DesktopSessionState, selector: ElementSelector, text: String, replaceExisting: Bool) throws -> JSONValue {

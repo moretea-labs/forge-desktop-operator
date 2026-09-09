@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import DesktopOperatorCore
@@ -47,6 +48,27 @@ private func temporarySessionStorePath() throws -> String {
     try store.checkpoint(restored)
     let restarted = DesktopSessionStore(statePath: path) { $0 }
     #expect(try restarted.get("desk_persisted").record.pid == 84)
+}
+
+@Test func desktopSessionStoreReusePreservesFreshVisualEvidence() throws {
+    let store = DesktopSessionStore(statePath: nil) { $0 }
+    guard let application = NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated }) else {
+        return
+    }
+    let first = try store.create(application: application, reuseExisting: true)
+    let evidence = DesktopVisualEvidence(
+        revision: 4,
+        windowId: 123,
+        frame: DesktopFrame(x: 10, y: 20, width: 300, height: 200),
+        capturedAt: Date()
+    )
+    first.visualRevision = 4
+    first.lastVisualEvidence = evidence
+
+    let reused = try store.create(application: application, reuseExisting: true)
+    #expect(reused === first)
+    #expect(reused.visualRevision == 4)
+    #expect(reused.lastVisualEvidence == evidence)
 }
 
 @Test func desktopSessionStoreFailsClosedOnCorruptPersistence() throws {
