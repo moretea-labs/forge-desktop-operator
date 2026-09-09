@@ -383,7 +383,18 @@ public final class PluginRuntime {
             return try execute(action: params.action, arguments: params.arguments)
         case ComputerProviderProtocol.executionMethod:
             guard let paramsValue = request.params else { throw PluginError.invalidArguments("computer_execute requires params") }
-            return try computerProvider.execute(decode(ComputerExecuteParams.self, from: paramsValue))
+            return try computerProvider.execute(
+                decode(ComputerExecuteParams.self, from: paramsValue),
+                nativeAction: { [self] action, arguments in
+                    try execute(action: action, arguments: arguments)
+                },
+                elementObserve: { [self] arguments in
+                    try executeComputerElementObserve(arguments)
+                },
+                elementAction: { [self] arguments in
+                    try executeComputerElementAction(arguments)
+                }
+            )
         case LegacyBrowserAutomationProtocol.method:
             guard let paramsValue = request.params else { throw PluginError.invalidArguments("macos_browser_automation requires params") }
             return try computerProvider.executeLegacyBrowserAutomation(paramsValue)
@@ -472,6 +483,48 @@ public final class PluginRuntime {
             throw PluginError.invalidArguments("\(name) must be an unsigned 32-bit integer")
         }
         return UInt32(integer)
+    }
+
+    private func executeComputerElementObserve(_ arguments: JSONValue) throws -> JSONValue {
+        let params = try decode(ComputerElementObserveParams.self, from: arguments)
+        let session = try sessions.get(params.interactionId)
+        let snapshot = try session.withLock {
+            try accessibility.normalizedSnapshot(
+                session: session,
+                maxDepth: params.maxDepth ?? 8,
+                maxNodes: params.maxNodes ?? 500,
+                includeValues: params.includeValues ?? true,
+                rootSelector: params.rootSelector
+            )
+        }
+        try sessions.checkpoint(session)
+        return try JSONValue.encode(snapshot)
+    }
+
+    private func executeComputerElementAction(_ arguments: JSONValue) throws -> JSONValue {
+        let params = try decode(ComputerElementActionParams.self, from: arguments)
+        let session = try sessions.get(params.target.interactionId)
+        let result = try withUILock {
+            try session.withLock {
+                let result = try accessibility.performElementAction(
+                    session: session,
+                    ref: params.ref,
+                    target: params.target,
+                    action: params.action,
+                    value: params.value
+                )
+                // Any successful semantic mutation retires the observation that authorized it.
+                // Reusing the same provider-local element ref after UI state may have changed is unsafe.
+                session.elements.removeAll(keepingCapacity: false)
+                session.elementWindowRefs.removeAll(keepingCapacity: false)
+                session.lastRootElement = nil
+                session.record.snapshotRevision += 1
+                session.record.lastObservedAt = nil
+                return result
+            }
+        }
+        try sessions.checkpoint(session)
+        return result
     }
 
     private func session(from object: [String: JSONValue]) throws -> DesktopSessionState {

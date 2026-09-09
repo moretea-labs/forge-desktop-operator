@@ -35,7 +35,9 @@
     "computer.observe.v1",
     "computer.input.v1",
     "computer.capture.v1",
-    "computer.browser_automation.v1"
+    "computer.browser_automation.v1",
+    "computer.element.observe.v2",
+    "computer.element.action.v2"
   ],
   "actions": [
     "desktop_status",

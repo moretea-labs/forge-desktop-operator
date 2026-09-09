@@ -38,7 +38,9 @@ public struct PluginManifest: Codable, Equatable, Sendable {
             ComputerProviderProtocol.observeCapability,
             ComputerProviderProtocol.inputCapability,
             ComputerProviderProtocol.captureCapability,
-            ComputerProviderProtocol.browserAutomationCapability
+            ComputerProviderProtocol.browserAutomationCapability,
+            ComputerProviderProtocol.elementObserveCapability,
+            ComputerProviderProtocol.elementActionCapability
         ],
         actions: [
             "desktop_status",

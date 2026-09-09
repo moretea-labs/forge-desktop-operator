@@ -22,6 +22,8 @@ public struct DesktopVisualEvidence: Equatable, Sendable {
 public final class DesktopSessionState {
     public var record: DesktopSessionRecord
     public var elements: [String: AXUIElement] = [:]
+    /// Ephemeral observation-local element -> AX window ref binding. Never persisted.
+    public var elementWindowRefs: [String: String] = [:]
     public var lastRootElement: AXUIElement?
     public var visualRevision: Int = 0
     public var lastVisualEvidence: DesktopVisualEvidence?
@@ -77,6 +79,7 @@ public final class DesktopSessionStore {
             existing.withLock {
                 existing.record.pid = application.processIdentifier
                 existing.elements.removeAll(keepingCapacity: false)
+                existing.elementWindowRefs.removeAll(keepingCapacity: false)
                 existing.lastRootElement = nil
             }
             try persistLocked()

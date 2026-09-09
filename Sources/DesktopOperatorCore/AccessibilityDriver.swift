@@ -49,6 +49,7 @@ public final class AccessibilityDriver {
             applicationRoot
         }
         session.elements.removeAll(keepingCapacity: true)
+        session.elementWindowRefs.removeAll(keepingCapacity: true)
         session.record.snapshotRevision += 1
         session.record.lastObservedAt = Date()
 
@@ -78,6 +79,131 @@ public final class AccessibilityDriver {
             nodeCount: counter,
             root: node
         )
+    }
+
+    public func normalizedSnapshot(
+        session: DesktopSessionState,
+        maxDepth: Int,
+        maxNodes: Int,
+        includeValues: Bool,
+        rootSelector: ElementSelector? = nil
+    ) throws -> ComputerElementSnapshot {
+        let legacy = try snapshot(
+            session: session,
+            maxDepth: maxDepth,
+            maxNodes: maxNodes,
+            includeValues: includeValues,
+            includeActions: true,
+            rootSelector: rootSelector
+        )
+        let record = session.record
+        let root = Self.normalizeElement(
+            legacy.root,
+            record: record,
+            snapshotRevision: legacy.snapshotRevision,
+            inheritedWindowRef: nil
+        )
+        Self.recordElementWindowBindings(root, into: session)
+        return ComputerElementSnapshot(
+            protocolVersion: ComputerProviderProtocol.elementProtocolVersion,
+            interactionId: record.interactionId,
+            snapshotRevision: legacy.snapshotRevision,
+            pid: record.pid,
+            bundleIdentifier: record.bundleIdentifier,
+            appName: record.appName,
+            capturedAt: legacy.capturedAt,
+            truncated: legacy.truncated,
+            nodeCount: legacy.nodeCount,
+            root: root
+        )
+    }
+
+    static func normalizeElement(
+        _ node: AXNode,
+        record: DesktopSessionRecord,
+        snapshotRevision: Int,
+        inheritedWindowRef: String?
+    ) -> ComputerElement {
+        let windowRef = node.role == (kAXWindowRole as String) ? node.ref : inheritedWindowRef
+        let actions = normalizedSemanticActions(
+            rawActions: node.actions,
+            role: node.role,
+            expanded: node.expanded,
+            selected: node.selected
+        )
+        let target = ComputerElementTarget(
+            interactionId: record.interactionId,
+            pid: record.pid,
+            bundleIdentifier: record.bundleIdentifier,
+            appName: record.appName,
+            windowRef: windowRef,
+            snapshotRevision: snapshotRevision
+        )
+        return ComputerElement(
+            ref: node.ref,
+            target: target,
+            role: node.role,
+            subrole: node.subrole,
+            name: node.title ?? node.description ?? node.identifier,
+            identifier: node.identifier,
+            description: node.description,
+            value: node.value,
+            state: ComputerElementState(
+                enabled: node.enabled,
+                focused: node.focused,
+                selected: node.selected,
+                expanded: node.expanded
+            ),
+            bounds: node.frame,
+            actions: actions,
+            children: node.children.map { child in
+                normalizeElement(
+                    child,
+                    record: record,
+                    snapshotRevision: snapshotRevision,
+                    inheritedWindowRef: windowRef
+                )
+            }
+        )
+    }
+
+    private static func recordElementWindowBindings(_ element: ComputerElement, into session: DesktopSessionState) {
+        if let windowRef = element.target.windowRef {
+            session.elementWindowRefs[element.ref] = windowRef
+        }
+        for child in element.children {
+            recordElementWindowBindings(child, into: session)
+        }
+    }
+
+    static func normalizedSemanticActions(
+        rawActions: [String],
+        role: String?,
+        expanded: Bool?,
+        selected: Bool?
+    ) -> [String] {
+        var actions = Set<String>()
+        let raw = Set(rawActions)
+        if raw.contains(kAXPressAction as String) { actions.insert("invoke") }
+        if raw.contains(kAXShowMenuAction as String) { actions.insert("show_menu") }
+        if raw.contains(kAXPickAction as String) { actions.insert("select") }
+        if raw.contains("AXOpen") || raw.contains("AXShowDefaultUI") { actions.insert("open") }
+        if raw.contains("AXScrollDownByPage") { actions.insert("scroll_page_down") }
+        if raw.contains("AXScrollUpByPage") { actions.insert("scroll_page_up") }
+        if expanded != nil {
+            actions.insert("expand")
+            actions.insert("collapse")
+            actions.insert("open")
+        }
+        if selected != nil { actions.insert("select") }
+        if role == kAXTextFieldRole as String || role == kAXTextAreaRole as String || role == "AXComboBox" {
+            actions.insert("set_value")
+        }
+        if role == kAXCheckBoxRole as String || role == kAXRadioButtonRole as String || role == "AXSwitch" {
+            actions.insert("toggle")
+        }
+        if role != nil { actions.insert("focus") }
+        return actions.sorted()
     }
 
     public func press(
@@ -421,6 +547,342 @@ public final class AccessibilityDriver {
         ])
     }
 
+    public func performElementAction(
+        session: DesktopSessionState,
+        ref: String,
+        target: ComputerElementTarget,
+        action: String,
+        value: JSONValue?
+    ) throws -> JSONValue {
+        let snapshotRevision = target.snapshotRevision
+        let element = try resolveObservedElement(
+            session: session,
+            ref: ref,
+            target: target
+        )
+        prepare(element)
+        let supported = Set(Self.normalizedSemanticActions(
+            rawActions: actionNames(of: element),
+            role: stringAttribute(element, kAXRoleAttribute as CFString),
+            expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
+            selected: boolAttribute(element, kAXSelectedAttribute as CFString)
+        ))
+        guard supported.contains(action) else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_ACTION_UNSUPPORTED",
+                message: "Element \(ref) does not support semantic action \(action) in snapshot \(snapshotRevision)",
+                retryable: false,
+                domain: "accessibility"
+            )
+        }
+
+        switch action {
+        case "invoke", "toggle":
+            return try performObservedAXAction(
+                element: element,
+                axAction: kAXPressAction as CFString,
+                method: "AXPress_background",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        case "show_menu":
+            return try performObservedAXAction(
+                element: element,
+                axAction: kAXShowMenuAction as CFString,
+                method: "AXShowMenu_background",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        case "focus":
+            return try setObservedAttribute(
+                element: element,
+                attribute: kAXFocusedAttribute as CFString,
+                value: kCFBooleanTrue,
+                method: "AXFocused_set",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        case "set_value":
+            guard let value else {
+                throw PluginError.invalidArguments("computer.element.action.v2 set_value requires value")
+            }
+            let nativeValue = try Self.nativeAttributeValue(value)
+            return try setObservedAttribute(
+                element: element,
+                attribute: kAXValueAttribute as CFString,
+                value: nativeValue,
+                method: "AXValue_set",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        case "expand":
+            var payload = try setDisclosure(
+                element: element,
+                expanded: true,
+                semanticAction: action,
+                snapshotRevision: snapshotRevision
+            ).objectValue ?? [:]
+            payload["ref"] = .string(ref)
+            return .object(payload)
+        case "collapse":
+            var payload = try setDisclosure(
+                element: element,
+                expanded: false,
+                semanticAction: action,
+                snapshotRevision: snapshotRevision
+            ).objectValue ?? [:]
+            payload["ref"] = .string(ref)
+            return .object(payload)
+        case "select":
+            var settable = DarwinBoolean(false)
+            let settableResult = AXUIElementIsAttributeSettable(
+                element,
+                kAXSelectedAttribute as CFString,
+                &settable
+            )
+            if settableResult == .success, settable.boolValue {
+                return try setObservedAttribute(
+                    element: element,
+                    attribute: kAXSelectedAttribute as CFString,
+                    value: kCFBooleanTrue,
+                    method: "AXSelected_set",
+                    semanticAction: action,
+                    ref: ref,
+                    snapshotRevision: snapshotRevision
+                )
+            }
+            return try performObservedAXAction(
+                element: element,
+                axAction: kAXPickAction as CFString,
+                method: "AXPick_background",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        case "open":
+            if isOutlineRow(element), Self.isDisclosureSettable(element) {
+                var payload = try setDisclosure(
+                    element: element,
+                    expanded: true,
+                    semanticAction: action,
+                    snapshotRevision: snapshotRevision
+                ).objectValue ?? [:]
+                payload["ref"] = .string(ref)
+                return .object(payload)
+            }
+            var result = AXUIElementPerformAction(element, "AXOpen" as CFString)
+            if result == .cannotComplete {
+                Thread.sleep(forTimeInterval: 0.15)
+                result = AXUIElementPerformAction(element, "AXOpen" as CFString)
+            }
+            if result == .success {
+                return .object([
+                    "method": .string("AXOpen_background"),
+                    "semantic_action": .string(action),
+                    "ref": .string(ref),
+                    "snapshot_revision": .number(Double(snapshotRevision))
+                ])
+            }
+            if (result == .actionUnsupported || result == .attributeUnsupported), actionNames(of: element).contains("AXShowDefaultUI") {
+                return try performObservedAXAction(
+                    element: element,
+                    axAction: "AXShowDefaultUI" as CFString,
+                    method: "AXShowDefaultUI_background",
+                    semanticAction: action,
+                    ref: ref,
+                    snapshotRevision: snapshotRevision
+                )
+            }
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_ACTION_FAILED",
+                message: "AXOpen failed with code \(result.rawValue)",
+                retryable: result == .cannotComplete,
+                domain: "accessibility"
+            )
+        case "scroll_page_down":
+            return try performObservedAXAction(
+                element: element,
+                axAction: "AXScrollDownByPage" as CFString,
+                method: "AXScrollDownByPage_background",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        case "scroll_page_up":
+            return try performObservedAXAction(
+                element: element,
+                axAction: "AXScrollUpByPage" as CFString,
+                method: "AXScrollUpByPage_background",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
+            )
+        default:
+            throw PluginError.invalidArguments("Unsupported computer element semantic action: \(action)")
+        }
+    }
+
+    static func validateObservedTargetIdentity(
+        session: DesktopSessionState,
+        ref: String,
+        target: ComputerElementTarget
+    ) throws {
+        let record = session.record
+        guard target.interactionId == record.interactionId,
+              target.pid == record.pid,
+              target.bundleIdentifier == record.bundleIdentifier,
+              target.appName == record.appName else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_TARGET_MISMATCH",
+                message: "Element target no longer matches the exact application binding that produced the observation.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+        guard target.snapshotRevision > 0, target.snapshotRevision == record.snapshotRevision else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_OBSERVATION_STALE",
+                message: "Element ref \(ref) belongs to snapshot \(target.snapshotRevision), but current snapshot is \(record.snapshotRevision). Re-observe before acting.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+        guard ref.hasPrefix("ax_\(target.snapshotRevision)_") else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_OBSERVATION_STALE",
+                message: "Element ref \(ref) does not belong to snapshot \(target.snapshotRevision).",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+        guard session.elementWindowRefs[ref] == target.windowRef else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_TARGET_MISMATCH",
+                message: "Element ref \(ref) no longer matches the observed window binding.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+        if let windowRef = target.windowRef {
+            guard windowRef.hasPrefix("ax_\(target.snapshotRevision)_"), session.elements[windowRef] != nil else {
+                throw PluginError(
+                    code: "COMPUTER_ELEMENT_TARGET_MISMATCH",
+                    message: "Observed window ref \(windowRef) is not present in the exact current observation.",
+                    retryable: true,
+                    domain: "accessibility"
+                )
+            }
+        }
+    }
+
+    private func resolveObservedElement(
+        session: DesktopSessionState,
+        ref: String,
+        target: ComputerElementTarget
+    ) throws -> AXUIElement {
+        try Self.validateObservedTargetIdentity(session: session, ref: ref, target: target)
+        guard let element = session.elements[ref] else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_OBSERVATION_STALE",
+                message: "Element ref \(ref) is not present in the exact current observation. Re-observe before acting.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+        return element
+    }
+
+    private func performObservedAXAction(
+        element: AXUIElement,
+        axAction: CFString,
+        method: String,
+        semanticAction: String,
+        ref: String,
+        snapshotRevision: Int
+    ) throws -> JSONValue {
+        var result = AXUIElementPerformAction(element, axAction)
+        if result == .cannotComplete {
+            Thread.sleep(forTimeInterval: 0.15)
+            result = AXUIElementPerformAction(element, axAction)
+        }
+        guard result == .success else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_ACTION_FAILED",
+                message: "\(axAction as String) failed with code \(result.rawValue)",
+                retryable: result == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+        return .object([
+            "method": .string(method),
+            "semantic_action": .string(semanticAction),
+            "ref": .string(ref),
+            "snapshot_revision": .number(Double(snapshotRevision))
+        ])
+    }
+
+    private func setObservedAttribute(
+        element: AXUIElement,
+        attribute: CFString,
+        value: CFTypeRef,
+        method: String,
+        semanticAction: String,
+        ref: String,
+        snapshotRevision: Int
+    ) throws -> JSONValue {
+        var settable = DarwinBoolean(false)
+        let settableResult = AXUIElementIsAttributeSettable(element, attribute, &settable)
+        guard settableResult == .success, settable.boolValue else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_ATTRIBUTE_NOT_SETTABLE",
+                message: "Accessibility attribute \(attribute as String) is not settable for element \(ref)",
+                retryable: settableResult == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+        var result = AXUIElementSetAttributeValue(element, attribute, value)
+        if result == .cannotComplete {
+            Thread.sleep(forTimeInterval: 0.15)
+            result = AXUIElementSetAttributeValue(element, attribute, value)
+        }
+        guard result == .success else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_ATTRIBUTE_SET_FAILED",
+                message: "Accessibility attribute \(attribute as String) failed with code \(result.rawValue)",
+                retryable: result == .cannotComplete,
+                domain: "accessibility"
+            )
+        }
+        return .object([
+            "method": .string(method),
+            "semantic_action": .string(semanticAction),
+            "ref": .string(ref),
+            "snapshot_revision": .number(Double(snapshotRevision))
+        ])
+    }
+
+    private static func nativeAttributeValue(_ value: JSONValue) throws -> CFTypeRef {
+        switch value {
+        case .string(let string): return string as CFString
+        case .number(let number): return NSNumber(value: number)
+        case .bool(let bool): return bool ? kCFBooleanTrue : kCFBooleanFalse
+        case .array(let values):
+            let strings = try values.map { item -> String in
+                guard case .string(let string) = item else {
+                    throw PluginError.invalidArguments("set_value arrays may contain only strings")
+                }
+                return string
+            }
+            return strings as CFArray
+        case .null, .object:
+            throw PluginError.invalidArguments("set_value supports string, number, bool, or string-array values")
+        }
+    }
+
     public func resolveElement(session: DesktopSessionState, selector: ElementSelector) throws -> AXUIElement {
         if let ref = selector.ref, let element = session.elements[ref] {
             return element
@@ -529,6 +991,8 @@ public final class AccessibilityDriver {
             value: includeValues && !secure ? jsonAttribute(element, kAXValueAttribute as CFString) : nil,
             enabled: boolAttribute(element, kAXEnabledAttribute as CFString),
             focused: boolAttribute(element, kAXFocusedAttribute as CFString),
+            selected: boolAttribute(element, kAXSelectedAttribute as CFString),
+            expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
             frame: frame(of: element),
             actions: includeActions ? actionNames(of: element) : [],
             children: childNodes
