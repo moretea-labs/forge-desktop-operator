@@ -162,6 +162,30 @@ import Testing
     #expect(routedAction == "desktop_key")
     #expect(routedArguments?["action"] == nil)
     #expect(routedArguments?["keys"]?.arrayValue?.count == 1)
+
+    routedAction = nil
+    routedArguments = nil
+    let openURL = try runtime.execute(
+        ComputerExecuteParams(
+            capability: ComputerProviderProtocol.inputCapability,
+            protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
+            arguments: .object([
+                "action": .string("desktop_open_url"),
+                "url": .string("https://example.com")
+            ])
+        ),
+        nativeAction: { action, arguments in
+            routedAction = action
+            routedArguments = arguments
+            return .string("opened")
+        },
+        elementObserve: { _ in Issue.record("Unexpected element observe route"); return .null },
+        elementAction: { _ in Issue.record("Unexpected element action route"); return .null }
+    )
+    #expect(openURL.stringValue == "opened")
+    #expect(routedAction == "desktop_open_url")
+    #expect(routedArguments?["action"] == nil)
+    #expect(routedArguments?["url"]?.stringValue == "https://example.com")
 }
 
 @Test func computerElementV2RejectsUnknownSemanticActionBeforeProviderDispatch() throws {

@@ -24,7 +24,7 @@ final class ComputerProviderRuntime {
                 capabilityId: ComputerProviderProtocol.inputCapability,
                 protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
                 method: ComputerProviderProtocol.executionMethod,
-                actions: ["desktop_press", "desktop_select_rows", "desktop_pointer_click", "desktop_type_text", "desktop_key"]
+                actions: ["desktop_press", "desktop_select_rows", "desktop_pointer_click", "desktop_type_text", "desktop_key", "desktop_open_url"]
             ),
             ComputerCapabilityRuntimeDescriptor(
                 capabilityId: ComputerProviderProtocol.captureCapability,
