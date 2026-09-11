@@ -87,3 +87,8 @@ The LaunchAgent starts through `/usr/bin/env -i` with a minimal `HOME`, `PATH`, 
 The provider is independently buildable and releasable. Forge consumes it through registration plus the versioned Unix-socket protocol rather than source imports. Runtime capability descriptors are negotiation evidence, not another policy layer.
 
 The advertised Unified Computer capabilities are `computer.observe.v1`, `computer.input.v1`, `computer.capture.v1`, `computer.element.observe.v2`, and `computer.element.action.v2`. `computer.browser_automation.v1` is deliberately not advertised.
+
+
+### Protected console boundary
+
+`computer.console.unlock.v1` is an independent provider capability because lock-screen credential input has a distinct authorization and secret-lifetime boundary. Forge owns the provider-neutral contract, negotiation, and explicit authorization policy; Desktop Operator owns macOS lock-state facts, exact `loginwindow` binding, physical input, bounded attempt enforcement, and postcondition verification. The capability is not reachable from the provider's generic compatibility action dispatcher or `desktop_batch`, so ordinary Computer input remains target-bound and cannot be widened into a lock-screen primitive.

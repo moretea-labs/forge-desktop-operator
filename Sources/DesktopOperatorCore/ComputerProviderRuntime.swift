@@ -27,6 +27,12 @@ final class ComputerProviderRuntime {
                 actions: ["desktop_press", "desktop_select_rows", "desktop_pointer_click", "desktop_type_text", "desktop_key", "desktop_open_url"]
             ),
             ComputerCapabilityRuntimeDescriptor(
+                capabilityId: ComputerProviderProtocol.consoleUnlockCapability,
+                protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
+                method: ComputerProviderProtocol.executionMethod,
+                actions: ["unlock_console"]
+            ),
+            ComputerCapabilityRuntimeDescriptor(
                 capabilityId: ComputerProviderProtocol.captureCapability,
                 protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
                 method: ComputerProviderProtocol.executionMethod,
@@ -51,7 +57,10 @@ final class ComputerProviderRuntime {
         _ params: ComputerExecuteParams,
         nativeAction: NativeActionExecutor,
         elementObserve: ElementExecutor,
-        elementAction: ElementExecutor
+        elementAction: ElementExecutor,
+        consoleUnlock: ElementExecutor = { _ in
+            throw PluginError(code: "CONSOLE_UNLOCK_EXECUTOR_UNAVAILABLE", message: "Console unlock executor is unavailable.", retryable: false, domain: "computer")
+        }
     ) throws -> JSONValue {
         guard let expectedVersion = ComputerProviderProtocol.expectedProtocolVersion(for: params.capability) else {
             throw PluginError(
@@ -71,6 +80,13 @@ final class ComputerProviderRuntime {
         }
 
         switch params.capability {
+        case ComputerProviderProtocol.consoleUnlockCapability:
+            guard params.arguments["action"]?.stringValue == "unlock_console" else {
+                throw PluginError(code: "COMPUTER_ACTION_UNSUPPORTED", message: "computer.console.unlock.v1 only exposes unlock_console", retryable: false, domain: "computer")
+            }
+            var object = params.arguments.objectValue ?? [:]
+            object.removeValue(forKey: "action")
+            return try consoleUnlock(.object(object))
         case ComputerProviderProtocol.elementObserveCapability:
             return try elementObserve(params.arguments)
         case ComputerProviderProtocol.elementActionCapability:

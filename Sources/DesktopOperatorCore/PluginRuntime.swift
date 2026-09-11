@@ -8,6 +8,7 @@ public final class PluginRuntime {
     public let sessions: DesktopSessionStore
     public let accessibility = AccessibilityDriver()
     private let computerProvider: ComputerProviderRuntime
+    private let consoleUnlock = ConsoleUnlockCoordinator()
     public private(set) var shutdownRequested = false
     public let socketPath: String
     private let physicalInputLock = NSRecursiveLock()
@@ -381,6 +382,11 @@ public final class PluginRuntime {
                 },
                 elementAction: { [self] arguments in
                     try executeComputerElementAction(arguments)
+                },
+                consoleUnlock: { [self] arguments in
+                    try withPhysicalInputLock {
+                        try consoleUnlock.execute(arguments)
+                    }
                 }
             )
         case LegacyBrowserAutomationProtocol.method:

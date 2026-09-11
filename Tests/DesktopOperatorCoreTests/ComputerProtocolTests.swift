@@ -399,3 +399,157 @@ import Testing
     #expect(secondObservation["snapshotRevision"]?.intValue == 8)
     #expect(secondObservation["ref"]?.stringValue == "ax_8_2")
 }
+
+
+@Test func consoleUnlockCapabilityIsIndependentAndRoutesOnlyDedicatedAction() throws {
+    var nativeCalls = 0
+    var consoleCalls = 0
+    let runtime = ComputerProviderRuntime(browserAutomation: BrowserAutomationBroker { _, _, _ in
+        BrowserAutomationCommandResult(status: 0, stdout: "ok")
+    })
+    #expect(runtime.capabilities.contains {
+        $0.capabilityId == ComputerProviderProtocol.consoleUnlockCapability && $0.actions == ["unlock_console"]
+    })
+
+    let result = try runtime.execute(
+        ComputerExecuteParams(
+            capability: ComputerProviderProtocol.consoleUnlockCapability,
+            protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
+            arguments: .object([
+                "action": .string("unlock_console"),
+                "authorization": .object(["kind": .string("explicit_single_use")]),
+            ])
+        ),
+        nativeAction: { _, _ in nativeCalls += 1; return .null },
+        elementObserve: { _ in .null },
+        elementAction: { _ in .null },
+        consoleUnlock: { arguments in
+            consoleCalls += 1
+            #expect(arguments["action"] == nil)
+            return .object(["routed": .bool(true)])
+        }
+    )
+    #expect(result["routed"]?.boolValue == true)
+    #expect(consoleCalls == 1)
+    #expect(nativeCalls == 0)
+
+    do {
+        _ = try runtime.execute(
+            ComputerExecuteParams(
+                capability: ComputerProviderProtocol.consoleUnlockCapability,
+                protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
+                arguments: .object(["action": .string("desktop_key")])
+            ),
+            nativeAction: { _, _ in nativeCalls += 1; return .null },
+            elementObserve: { _ in .null },
+            elementAction: { _ in .null },
+            consoleUnlock: { _ in Issue.record("Unexpected console route"); return .null }
+        )
+        Issue.record("Expected dedicated-action rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ACTION_UNSUPPORTED")
+    }
+    #expect(nativeCalls == 0)
+}
+
+@Test func consoleUnlockRequiresExplicitSingleUseAuthorizationBeforeInput() throws {
+    var submitted = false
+    let coordinator = ConsoleUnlockCoordinator(
+        isLocked: { true },
+        loginwindow: { ConsoleLoginwindowIdentity(pid: 42, bundleIdentifier: "com.apple.loginwindow") },
+        accessibilityTrusted: { true },
+        submitCredential: { _ in submitted = true },
+        sleep: { _ in },
+        now: Date.init,
+        verificationTimeout: 0
+    )
+    do {
+        _ = try coordinator.execute(.object(["credential": .string("fixture-only")]))
+        Issue.record("Expected authorization rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "CONSOLE_UNLOCK_EXPLICIT_AUTHORIZATION_REQUIRED")
+    }
+    #expect(!submitted)
+}
+
+@Test func consoleUnlockVerifiesLockedToUnlockedAndDoesNotReturnCredential() throws {
+    var locked = true
+    let invocation = UUID().uuidString
+    let coordinator = ConsoleUnlockCoordinator(
+        isLocked: { locked },
+        loginwindow: { ConsoleLoginwindowIdentity(pid: 42, bundleIdentifier: "com.apple.loginwindow") },
+        accessibilityTrusted: { true },
+        submitCredential: { credential in
+            #expect(credential == "fixture-only")
+            locked = false
+        },
+        sleep: { _ in }
+    )
+    let result = try coordinator.execute(.object([
+        "authorization": .object([
+            "kind": .string("explicit_single_use"),
+            "confirmed": .bool(true),
+            "invocation_id": .string(invocation),
+        ]),
+        "credential": .string("fixture-only"),
+    ]))
+    #expect(result["unlocked"]?.boolValue == true)
+    #expect(result["verified"]?.boolValue == true)
+    #expect(result["credential"] == nil)
+}
+
+@Test func consoleUnlockUnchangedLockStateIsTypedAndCredentialFree() throws {
+    let invocation = UUID().uuidString
+    let fixture = "fixture-credential-never-echo"
+    let coordinator = ConsoleUnlockCoordinator(
+        isLocked: { true },
+        loginwindow: { ConsoleLoginwindowIdentity(pid: 42, bundleIdentifier: "com.apple.loginwindow") },
+        accessibilityTrusted: { true },
+        submitCredential: { _ in },
+        sleep: { _ in },
+        now: Date.init,
+        verificationTimeout: 0
+    )
+    do {
+        _ = try coordinator.execute(.object([
+            "authorization": .object([
+                "kind": .string("explicit_single_use"),
+                "confirmed": .bool(true),
+                "invocation_id": .string(invocation),
+            ]),
+            "credential": .string(fixture),
+        ]))
+        Issue.record("Expected unchanged-lock rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "CONSOLE_UNLOCK_CREDENTIAL_NOT_ACCEPTED")
+        #expect(!error.description.contains(fixture))
+    }
+}
+
+@Test func consoleUnlockAuthorizationCannotBeReplayed() throws {
+    let invocation = UUID().uuidString
+    let gate = ConsoleUnlockAttemptGate()
+    let coordinator = ConsoleUnlockCoordinator(
+        gate: gate,
+        isLocked: { false },
+        loginwindow: { nil },
+        accessibilityTrusted: { true },
+        submitCredential: { _ in Issue.record("Unexpected input") },
+        sleep: { _ in }
+    )
+    let request: JSONValue = .object([
+        "authorization": .object([
+            "kind": .string("explicit_single_use"),
+            "confirmed": .bool(true),
+            "invocation_id": .string(invocation),
+        ]),
+        "credential": .string("fixture-only"),
+    ])
+    do { _ = try coordinator.execute(request) } catch { }
+    do {
+        _ = try coordinator.execute(request)
+        Issue.record("Expected replay rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "CONSOLE_UNLOCK_AUTHORIZATION_REPLAYED")
+    }
+}

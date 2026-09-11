@@ -20,7 +20,7 @@ public struct PluginManifest: Codable, Equatable, Sendable {
     public static let current = PluginManifest(
         id: "desktop_operator",
         name: "Forge Desktop Operator",
-        version: "0.4.0",
+        version: "0.4.1",
         protocolVersion: "1.0",
         mode: "external",
         scope: "controller",
@@ -37,6 +37,7 @@ public struct PluginManifest: Codable, Equatable, Sendable {
             "desktop.batch",
             ComputerProviderProtocol.observeCapability,
             ComputerProviderProtocol.inputCapability,
+            ComputerProviderProtocol.consoleUnlockCapability,
             ComputerProviderProtocol.captureCapability,
             ComputerProviderProtocol.elementObserveCapability,
             ComputerProviderProtocol.elementActionCapability
@@ -97,7 +98,7 @@ public enum DesktopPermissions {
             service: "accessibility",
             granted: granted,
             settingsPath: "Privacy & Security > Accessibility",
-            requiredFor: ["desktop_observe", "desktop_press", "desktop_pointer_click", "desktop_type_text", "desktop_key", "desktop_copy", "desktop_paste", "desktop_batch"],
+            requiredFor: ["desktop_observe", "desktop_press", "desktop_pointer_click", "desktop_type_text", "desktop_key", "desktop_copy", "desktop_paste", "desktop_batch", "unlock_console"],
             bundleIdentifier: DesktopOperatorIdentity.bundleIdentifier,
             applicationName: DesktopOperatorIdentity.displayName,
             applicationPath: DesktopOperatorIdentity.bundlePath

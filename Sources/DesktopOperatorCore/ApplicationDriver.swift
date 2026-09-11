@@ -235,7 +235,7 @@ public enum ApplicationDriver {
         return (values["CGSSessionScreenIsLocked"] as? Bool) == true
     }
 
-    private static func currentSessionIsLocked() -> Bool {
+    static func currentSessionIsLocked() -> Bool {
         sessionIsLocked(CGSessionCopyCurrentDictionary())
     }
 

@@ -79,3 +79,12 @@ Failure:
 ```json
 {"id":"request-1","ok":false,"error":{"code":"COMPUTER_ELEMENT_OBSERVATION_STALE","message":"Re-observe before acting.","retryable":true,"domain":"accessibility"}}
 ```
+
+
+## Explicit console unlock capability
+
+`computer.console.unlock.v1` is a provider-owned, macOS-only protected capability exposed through `computer_execute` with action `unlock_console`. It is intentionally separate from `computer.input.v1` and from the compatibility `execute`/`desktop_batch` action surface.
+
+The invocation requires a non-reusable `explicit_single_use` authorization envelope and one ephemeral `credential` field. The provider consumes the authorization before checking or performing physical input, applies a bounded in-memory attempt window, requires the current console to be locked, resolves only the visible `com.apple.loginwindow` protected surface, revalidates that target immediately before input, performs only credential text plus Return, and reports success only after the system lock dictionary observes the console become unlocked. No screenshot, clipboard, coordinate, shell, AppleScript, application-activation, or generic key fallback is permitted.
+
+Credential material is request-memory only. It is not part of manifest state, plugin registration, result/error payloads, logs, persisted receipts, or provider state. An unchanged authoritative lock state is a typed failure rather than transport success.
