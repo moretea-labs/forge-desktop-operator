@@ -22,13 +22,10 @@ final class ConsoleUnlockAttemptGate: @unchecked Sendable {
         self.replayRetention = replayRetention
     }
 
-    func consume(invocationId: String, at now: Date) throws {
+    func consumeAuthorization(invocationId: String, at now: Date) throws {
         lock.lock()
         defer { lock.unlock() }
-
         consumedInvocations = consumedInvocations.filter { now.timeIntervalSince($0.value) <= replayRetention }
-        attempts.removeAll { now.timeIntervalSince($0) > attemptWindow }
-
         guard consumedInvocations[invocationId] == nil else {
             throw PluginError(
                 code: "CONSOLE_UNLOCK_AUTHORIZATION_REPLAYED",
@@ -38,7 +35,12 @@ final class ConsoleUnlockAttemptGate: @unchecked Sendable {
             )
         }
         consumedInvocations[invocationId] = now
+    }
 
+    func consumeAttempt(at now: Date) throws {
+        lock.lock()
+        defer { lock.unlock() }
+        attempts.removeAll { now.timeIntervalSince($0) > attemptWindow }
         guard attempts.count < maxAttempts else {
             throw PluginError(
                 code: "CONSOLE_UNLOCK_RATE_LIMITED",
@@ -56,14 +58,17 @@ final class ConsoleUnlockCoordinator {
     typealias LoginwindowProvider = () -> ConsoleLoginwindowIdentity?
     typealias AccessibilityProvider = () -> Bool
     typealias CredentialSubmitter = (_ credential: String) throws -> Void
+    typealias CredentialPrompter = () throws -> String
     typealias Sleeper = (_ seconds: TimeInterval) -> Void
     typealias Clock = () -> Date
 
     private let gate: ConsoleUnlockAttemptGate
+    private let credentialVault: ConsoleUnlockCredentialVault
     private let isLocked: LockedProvider
     private let loginwindow: LoginwindowProvider
     private let accessibilityTrusted: AccessibilityProvider
     private let submitCredential: CredentialSubmitter
+    private let promptCredential: CredentialPrompter
     private let sleep: Sleeper
     private let now: Clock
     private let verificationTimeout: TimeInterval
@@ -71,20 +76,24 @@ final class ConsoleUnlockCoordinator {
 
     init(
         gate: ConsoleUnlockAttemptGate = ConsoleUnlockAttemptGate(),
+        credentialVault: ConsoleUnlockCredentialVault = ConsoleUnlockCredentialVault(),
         isLocked: @escaping LockedProvider = ApplicationDriver.currentSessionIsLocked,
         loginwindow: @escaping LoginwindowProvider = ConsoleUnlockCoordinator.currentLoginwindow,
         accessibilityTrusted: @escaping AccessibilityProvider = { AXIsProcessTrusted() },
         submitCredential: @escaping CredentialSubmitter = ConsoleUnlockCoordinator.submitCredentialWithCGEvent,
+        promptCredential: @escaping CredentialPrompter = ConsoleUnlockCredentialPrompt.prompt,
         sleep: @escaping Sleeper = { Thread.sleep(forTimeInterval: $0) },
         now: @escaping Clock = Date.init,
         verificationTimeout: TimeInterval = 4,
         verificationInterval: TimeInterval = 0.1
     ) {
         self.gate = gate
+        self.credentialVault = credentialVault
         self.isLocked = isLocked
         self.loginwindow = loginwindow
         self.accessibilityTrusted = accessibilityTrusted
         self.submitCredential = submitCredential
+        self.promptCredential = promptCredential
         self.sleep = sleep
         self.now = now
         self.verificationTimeout = verificationTimeout
@@ -93,32 +102,47 @@ final class ConsoleUnlockCoordinator {
 
     func execute(_ arguments: JSONValue) throws -> JSONValue {
         guard let object = arguments.objectValue else {
-            throw PluginError.invalidArguments("unlock_console requires an object argument")
+            throw PluginError.invalidArguments("console unlock requires an object argument")
         }
-        guard let authorization = object["authorization"]?.objectValue,
-              authorization["kind"]?.stringValue == "explicit_single_use",
-              authorization["confirmed"]?.boolValue == true,
-              let invocationId = authorization["invocation_id"]?.stringValue,
-              UUID(uuidString: invocationId) != nil else {
+        let action = object["action"]?.stringValue ?? "unlock_console"
+        let invocationId = try authorizedInvocationId(object)
+        switch action {
+        case "prepare_unlock_console":
+            return try prepare(invocationId: invocationId)
+        case "unlock_console":
+            return try unlock(object: object, invocationId: invocationId)
+        default:
             throw PluginError(
-                code: "CONSOLE_UNLOCK_EXPLICIT_AUTHORIZATION_REQUIRED",
-                message: "unlock_console requires one explicit single-use authorization for this invocation.",
+                code: "COMPUTER_ACTION_UNSUPPORTED",
+                message: "computer.console.unlock.v1 exposes prepare_unlock_console and unlock_console only.",
                 retryable: false,
-                domain: "authorization"
+                domain: "computer"
             )
         }
-        guard let credential = object["credential"]?.stringValue,
-              !credential.isEmpty,
-              credential.lengthOfBytes(using: .utf8) <= 1_024 else {
-            throw PluginError(
-                code: "CONSOLE_UNLOCK_CREDENTIAL_REQUIRED",
-                message: "unlock_console requires one bounded ephemeral credential input.",
-                retryable: false,
-                domain: "authorization"
-            )
-        }
+    }
 
-        try gate.consume(invocationId: invocationId, at: now())
+    private func prepare(invocationId: String) throws -> JSONValue {
+        try gate.consumeAuthorization(invocationId: invocationId, at: now())
+        guard !isLocked() else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_PREPARE_REQUIRES_UNLOCKED_CONSOLE",
+                message: "Prepare console unlock before locking the macOS console.",
+                retryable: false,
+                domain: "console"
+            )
+        }
+        let credential = try promptCredential()
+        let bounded = try boundedCredential(credential)
+        let prepared = credentialVault.store(bounded, at: now())
+        return .object([
+            "prepared": .bool(true),
+            "credential_handle": .string(prepared.handle),
+            "expires_in_ms": .number(max(0, prepared.expiresAt.timeIntervalSince(now()) * 1_000)),
+        ])
+    }
+
+    private func unlock(object: [String: JSONValue], invocationId: String) throws -> JSONValue {
+        try gate.consumeAuthorization(invocationId: invocationId, at: now())
 
         guard isLocked() else {
             throw PluginError(
@@ -144,9 +168,6 @@ final class ConsoleUnlockCoordinator {
                 domain: "console"
             )
         }
-
-        // Re-read both system facts immediately before physical input. This capability never
-        // treats loginwindow as a normal desktop application and never falls back to coordinates.
         guard isLocked(), loginwindow() == target else {
             throw PluginError(
                 code: "CONSOLE_UNLOCK_STALE_LOGINWINDOW",
@@ -156,6 +177,21 @@ final class ConsoleUnlockCoordinator {
             )
         }
 
+        let credential: String
+        if let handle = object["credential_handle"]?.stringValue {
+            credential = try credentialVault.consume(handle: handle, at: now())
+        } else if let compatibilityCredential = object["credential"]?.stringValue {
+            credential = try boundedCredential(compatibilityCredential)
+        } else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_CREDENTIAL_HANDLE_REQUIRED",
+                message: "unlock_console requires one provider-local single-use credential handle.",
+                retryable: false,
+                domain: "authorization"
+            )
+        }
+
+        try gate.consumeAttempt(at: now())
         try submitCredential(credential)
 
         let deadline = now().addingTimeInterval(verificationTimeout)
@@ -186,6 +222,34 @@ final class ConsoleUnlockCoordinator {
         )
     }
 
+    private func authorizedInvocationId(_ object: [String: JSONValue]) throws -> String {
+        guard let authorization = object["authorization"]?.objectValue,
+              authorization["kind"]?.stringValue == "explicit_single_use",
+              authorization["confirmed"]?.boolValue == true,
+              let invocationId = authorization["invocation_id"]?.stringValue,
+              UUID(uuidString: invocationId) != nil else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_EXPLICIT_AUTHORIZATION_REQUIRED",
+                message: "Console unlock requires one explicit single-use authorization for this invocation.",
+                retryable: false,
+                domain: "authorization"
+            )
+        }
+        return invocationId
+    }
+
+    private func boundedCredential(_ credential: String) throws -> String {
+        guard !credential.isEmpty, credential.lengthOfBytes(using: .utf8) <= 1_024 else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_CREDENTIAL_REQUIRED",
+                message: "Console unlock requires one bounded ephemeral credential input.",
+                retryable: false,
+                domain: "authorization"
+            )
+        }
+        return credential
+    }
+
     static func currentLoginwindow() -> ConsoleLoginwindowIdentity? {
         let options: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]
         guard let windows = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] else { return nil }
@@ -201,9 +265,6 @@ final class ConsoleUnlockCoordinator {
     }
 
     static func submitCredentialWithCGEvent(_ credential: String) throws {
-        // The only physical-input sequence owned by this capability is credential text + Return.
-        // There is intentionally no pointer input, application activation, shell/AppleScript path,
-        // clipboard path, or generic key forwarding here.
         try InputDriver.typeUnicode(credential, replaceExisting: false)
         try InputDriver.press(keys: ["return"])
     }

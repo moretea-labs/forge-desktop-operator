@@ -408,7 +408,7 @@ import Testing
         BrowserAutomationCommandResult(status: 0, stdout: "ok")
     })
     #expect(runtime.capabilities.contains {
-        $0.capabilityId == ComputerProviderProtocol.consoleUnlockCapability && $0.actions == ["unlock_console"]
+        $0.capabilityId == ComputerProviderProtocol.consoleUnlockCapability && $0.actions == ["prepare_unlock_console", "unlock_console"]
     })
 
     let result = try runtime.execute(
@@ -425,7 +425,7 @@ import Testing
         elementAction: { _ in .null },
         consoleUnlock: { arguments in
             consoleCalls += 1
-            #expect(arguments["action"] == nil)
+            #expect(arguments["action"]?.stringValue == "unlock_console")
             return .object(["routed": .bool(true)])
         }
     )
@@ -552,4 +552,90 @@ import Testing
     } catch let error as PluginError {
         #expect(error.code == "CONSOLE_UNLOCK_AUTHORIZATION_REPLAYED")
     }
+}
+
+
+@Test func consoleUnlockPreparationReturnsOpaqueSingleUseHandleAndNeverCredential() throws {
+    var locked = false
+    let vault = ConsoleUnlockCredentialVault(ttl: 120)
+    let coordinator = ConsoleUnlockCoordinator(
+        credentialVault: vault,
+        isLocked: { locked },
+        loginwindow: { locked ? ConsoleLoginwindowIdentity(pid: 42, bundleIdentifier: "com.apple.loginwindow") : nil },
+        accessibilityTrusted: { true },
+        submitCredential: { credential in
+            #expect(credential == "fixture-only")
+            locked = false
+        },
+        promptCredential: { "fixture-only" },
+        sleep: { _ in }
+    )
+
+    let prepared = try coordinator.execute(.object([
+        "action": .string("prepare_unlock_console"),
+        "authorization": .object([
+            "kind": .string("explicit_single_use"),
+            "confirmed": .bool(true),
+            "invocation_id": .string(UUID().uuidString),
+        ]),
+    ]))
+    #expect(prepared["prepared"]?.boolValue == true)
+    #expect(prepared["credential"] == nil)
+    let handle = try #require(prepared["credential_handle"]?.stringValue)
+    #expect(UUID(uuidString: handle) != nil)
+
+    locked = true
+    let result = try coordinator.execute(.object([
+        "action": .string("unlock_console"),
+        "authorization": .object([
+            "kind": .string("explicit_single_use"),
+            "confirmed": .bool(true),
+            "invocation_id": .string(UUID().uuidString),
+        ]),
+        "credential_handle": .string(handle),
+    ]))
+    #expect(result["unlocked"]?.boolValue == true)
+    #expect(result["verified"]?.boolValue == true)
+
+    locked = true
+    do {
+        _ = try coordinator.execute(.object([
+            "action": .string("unlock_console"),
+            "authorization": .object([
+                "kind": .string("explicit_single_use"),
+                "confirmed": .bool(true),
+                "invocation_id": .string(UUID().uuidString),
+            ]),
+            "credential_handle": .string(handle),
+        ]))
+        Issue.record("Expected consumed-handle rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "CONSOLE_UNLOCK_CREDENTIAL_HANDLE_UNAVAILABLE")
+    }
+}
+
+@Test func consoleUnlockPreparationRefusesLockedConsoleBeforePrompting() throws {
+    var prompted = false
+    let coordinator = ConsoleUnlockCoordinator(
+        isLocked: { true },
+        loginwindow: { ConsoleLoginwindowIdentity(pid: 42, bundleIdentifier: "com.apple.loginwindow") },
+        accessibilityTrusted: { true },
+        submitCredential: { _ in Issue.record("Unexpected input") },
+        promptCredential: { prompted = true; return "fixture-only" },
+        sleep: { _ in }
+    )
+    do {
+        _ = try coordinator.execute(.object([
+            "action": .string("prepare_unlock_console"),
+            "authorization": .object([
+                "kind": .string("explicit_single_use"),
+                "confirmed": .bool(true),
+                "invocation_id": .string(UUID().uuidString),
+            ]),
+        ]))
+        Issue.record("Expected locked-console preparation rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "CONSOLE_UNLOCK_PREPARE_REQUIRES_UNLOCKED_CONSOLE")
+    }
+    #expect(!prompted)
 }

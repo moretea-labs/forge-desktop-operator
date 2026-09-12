@@ -92,3 +92,8 @@ The advertised Unified Computer capabilities are `computer.observe.v1`, `compute
 ### Protected console boundary
 
 `computer.console.unlock.v1` is an independent provider capability because lock-screen credential input has a distinct authorization and secret-lifetime boundary. Forge owns the provider-neutral contract, negotiation, and explicit authorization policy; Desktop Operator owns macOS lock-state facts, exact `loginwindow` binding, physical input, bounded attempt enforcement, and postcondition verification. The capability is not reachable from the provider's generic compatibility action dispatcher or `desktop_batch`, so ordinary Computer input remains target-bound and cannot be widened into a lock-screen primitive.
+
+
+### Console credential locality
+
+The protected console-unlock boundary does not require ChatGPT or Forge Runtime to transport the macOS login password. Desktop Operator owns a short-lived, process-local credential vault populated only from a provider-local secure prompt while the console is unlocked. Forge receives only an opaque single-use handle. This keeps raw credentials out of MCP arguments, plugin receipts, Process/Work state, logs, files, clipboard state, and replayable jobs while preserving the existing loginwindow-only input and postcondition checks.

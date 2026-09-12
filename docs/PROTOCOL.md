@@ -88,3 +88,8 @@ Failure:
 The invocation requires a non-reusable `explicit_single_use` authorization envelope and one ephemeral `credential` field. The provider consumes the authorization before checking or performing physical input, applies a bounded in-memory attempt window, requires the current console to be locked, resolves only the visible `com.apple.loginwindow` protected surface, revalidates that target immediately before input, performs only credential text plus Return, and reports success only after the system lock dictionary observes the console become unlocked. No screenshot, clipboard, coordinate, shell, AppleScript, application-activation, or generic key fallback is permitted.
 
 Credential material is request-memory only. It is not part of manifest state, plugin registration, result/error payloads, logs, persisted receipts, or provider state. An unchanged authoritative lock state is a typed failure rather than transport success.
+
+
+## Protected console credential preparation
+
+`computer.console.unlock.v1` exposes two protected actions. `prepare_unlock_console` is valid only while the console is unlocked; it shows a provider-local secure password field and returns an opaque `credential_handle` plus a bounded expiry. The credential never enters the socket request or response. `unlock_console` consumes that handle exactly once after the console is locked, then performs the existing loginwindow identity checks, credential text + Return input, and authoritative unlocked postcondition verification. Provider restart or handle expiry invalidates the preparation.

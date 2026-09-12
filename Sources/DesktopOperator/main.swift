@@ -1,3 +1,4 @@
+import AppKit
 import DesktopOperatorCore
 import Foundation
 
@@ -28,8 +29,22 @@ let command = arguments.first ?? "help"
         try PluginPaths.ensureRuntimeDirectories()
         let runtime = PluginRuntime(socketPath: path, sessions: DesktopSessionStore())
         let server = UnixSocketServer(path: path, runtime: runtime)
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        final class ServerState: @unchecked Sendable {
+            private let lock = NSLock()
+            private var storedError: Error?
+            func set(_ error: Error) { lock.lock(); storedError = error; lock.unlock() }
+            func get() -> Error? { lock.lock(); defer { lock.unlock() }; return storedError }
+        }
+        let state = ServerState()
         fputs("desktop-operator listening at \(path)\n", stderr)
-        try server.run()
+        DispatchQueue.global(qos: .userInitiated).async {
+            do { try server.run() } catch { state.set(error) }
+            DispatchQueue.main.async { application.stop(nil) }
+        }
+        application.run()
+        if let error = state.get() { throw error }
     case "manifest":
         try printEncoded(PluginManifest.current)
     case "health":
