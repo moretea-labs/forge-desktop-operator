@@ -237,6 +237,66 @@ public final class PluginRuntime {
                     ])
                 }
             }
+        case "desktop_pointer_drag":
+            let session = try session(from: object)
+            let windowId = try requiredWindowId(object["window_id"], name: "window_id")
+            guard let visualRevision = object["visual_revision"]?.intValue, visualRevision >= 1 else {
+                throw PluginError.invalidArguments("desktop_pointer_drag requires a positive visual_revision")
+            }
+            let fromX = try requiredNumber(object["from_x"], name: "from_x")
+            let fromY = try requiredNumber(object["from_y"], name: "from_y")
+            let toX = try requiredNumber(object["to_x"], name: "to_x")
+            let toY = try requiredNumber(object["to_y"], name: "to_y")
+            guard fromX != toX || fromY != toY else {
+                throw PluginError.invalidArguments("desktop_pointer_drag requires distinct source and destination points")
+            }
+            let button = object["button"]?.stringValue?.lowercased() ?? "left"
+            guard ["left", "middle", "right"].contains(button) else {
+                throw PluginError.invalidArguments("desktop_pointer_drag button must be left, middle, or right")
+            }
+            let steps = object["steps"]?.intValue ?? 10
+            guard (1...100).contains(steps) else {
+                throw PluginError.invalidArguments("desktop_pointer_drag steps must be between 1 and 100")
+            }
+            return try withPhysicalInputLock {
+                try session.withLock {
+                    guard ApplicationDriver.isActive(pid: session.record.pid) else {
+                        throw PluginError(
+                            code: "FOREGROUND_POINTER_INPUT_REQUIRES_ACTIVE_APP",
+                            message: "Pointer input is allowed only while the target application is already foreground; Forge Desktop Operator will not activate it automatically.",
+                            retryable: true,
+                            domain: "input"
+                        )
+                    }
+                    let currentWindow = ApplicationDriver.windows(pid: session.record.pid).first { $0.windowId == windowId }
+                    let validatedFrame = try Self.validatePointerEvidence(
+                        evidence: session.lastVisualEvidence,
+                        requestedRevision: visualRevision,
+                        requestedWindowId: windowId,
+                        points: [(x: fromX, y: fromY), (x: toX, y: toY)],
+                        currentWindow: currentWindow,
+                        errorCodePrefix: "POINTER_DRAG"
+                    )
+                    let immediateWindow = ApplicationDriver.windows(pid: session.record.pid).first { $0.windowId == windowId }
+                    guard immediateWindow?.onScreen == true, immediateWindow?.frame == validatedFrame else {
+                        throw PluginError(code: "POINTER_DRAG_WINDOW_CHANGED", message: "Target window changed after validation; capture a fresh window screenshot before dragging.", retryable: true, domain: "input")
+                    }
+                    try InputDriver.drag(fromX: fromX, fromY: fromY, toX: toX, toY: toY, button: button, steps: steps)
+                    return .object([
+                        "dragged": .bool(true),
+                        "method": .string("CGEvent_pointer_drag"),
+                        "button": .string(button),
+                        "steps": .number(Double(steps)),
+                        "interaction_id": .string(session.record.interactionId),
+                        "window_id": .number(Double(windowId)),
+                        "visual_revision": .number(Double(visualRevision)),
+                        "from_x": .number(fromX),
+                        "from_y": .number(fromY),
+                        "to_x": .number(toX),
+                        "to_y": .number(toY)
+                    ])
+                }
+            }
         case "desktop_type_text":
             let session = try session(from: object)
             let selector = try parseSelector(object["selector"])
@@ -433,6 +493,43 @@ public final class PluginRuntime {
         ])
     }
 
+    static func validatePointerEvidence(
+        evidence: DesktopVisualEvidence?,
+        requestedRevision: Int,
+        requestedWindowId: UInt32,
+        points: [(x: Double, y: Double)],
+        currentWindow: DesktopWindow?,
+        errorCodePrefix: String,
+        now: Date = Date(),
+        maxAgeSeconds: TimeInterval = 15
+    ) throws -> DesktopFrame {
+        guard !points.isEmpty else {
+            throw PluginError.invalidArguments("Pointer evidence validation requires at least one point")
+        }
+        guard let evidence else {
+            throw PluginError(code: "\(errorCodePrefix)_VISUAL_EVIDENCE_REQUIRED", message: "Capture the explicit target window before pointer input.", retryable: true, domain: "input")
+        }
+        guard evidence.revision == requestedRevision, evidence.windowId == requestedWindowId else {
+            throw PluginError(code: "\(errorCodePrefix)_STALE_VISUAL_REVISION", message: "visual_revision does not match the latest screenshot evidence for this session and window.", retryable: true, domain: "input")
+        }
+        let age = now.timeIntervalSince(evidence.capturedAt)
+        guard age >= 0, age <= maxAgeSeconds else {
+            throw PluginError(code: "\(errorCodePrefix)_STALE_VISUAL_REVISION", message: "Window screenshot evidence is too old for pointer input; capture the window again.", retryable: true, domain: "input")
+        }
+        guard let currentWindow, currentWindow.onScreen, let frame = currentWindow.frame, frame.width > 0, frame.height > 0 else {
+            throw PluginError(code: "\(errorCodePrefix)_WINDOW_UNAVAILABLE", message: "Target window is missing, off-screen, or has invalid bounds.", retryable: true, domain: "input")
+        }
+        guard frame == evidence.frame else {
+            throw PluginError(code: "\(errorCodePrefix)_WINDOW_CHANGED", message: "Target window moved or resized since the screenshot; capture a fresh window screenshot.", retryable: true, domain: "input")
+        }
+        guard points.allSatisfy({ point in
+            point.x >= frame.x && point.x < frame.x + frame.width && point.y >= frame.y && point.y < frame.y + frame.height
+        }) else {
+            throw PluginError(code: "\(errorCodePrefix)_OUTSIDE_WINDOW", message: "Pointer coordinates are outside the authorized target window bounds.", retryable: false, domain: "input")
+        }
+        return frame
+    }
+
     static func validatePointerClickEvidence(
         evidence: DesktopVisualEvidence?,
         requestedRevision: Int,
@@ -443,26 +540,16 @@ public final class PluginRuntime {
         now: Date = Date(),
         maxAgeSeconds: TimeInterval = 15
     ) throws -> DesktopFrame {
-        guard let evidence else {
-            throw PluginError(code: "POINTER_CLICK_VISUAL_EVIDENCE_REQUIRED", message: "Capture the explicit target window before pointer input.", retryable: true, domain: "input")
-        }
-        guard evidence.revision == requestedRevision, evidence.windowId == requestedWindowId else {
-            throw PluginError(code: "POINTER_CLICK_STALE_VISUAL_REVISION", message: "visual_revision does not match the latest screenshot evidence for this session and window.", retryable: true, domain: "input")
-        }
-        let age = now.timeIntervalSince(evidence.capturedAt)
-        guard age >= 0, age <= maxAgeSeconds else {
-            throw PluginError(code: "POINTER_CLICK_STALE_VISUAL_REVISION", message: "Window screenshot evidence is too old for pointer input; capture the window again.", retryable: true, domain: "input")
-        }
-        guard let currentWindow, currentWindow.onScreen, let frame = currentWindow.frame, frame.width > 0, frame.height > 0 else {
-            throw PluginError(code: "POINTER_CLICK_WINDOW_UNAVAILABLE", message: "Target window is missing, off-screen, or has invalid bounds.", retryable: true, domain: "input")
-        }
-        guard frame == evidence.frame else {
-            throw PluginError(code: "POINTER_CLICK_WINDOW_CHANGED", message: "Target window moved or resized since the screenshot; capture a fresh window screenshot.", retryable: true, domain: "input")
-        }
-        guard x >= frame.x, x < frame.x + frame.width, y >= frame.y, y < frame.y + frame.height else {
-            throw PluginError(code: "POINTER_CLICK_OUTSIDE_WINDOW", message: "Pointer coordinates are outside the authorized target window bounds.", retryable: false, domain: "input")
-        }
-        return frame
+        try validatePointerEvidence(
+            evidence: evidence,
+            requestedRevision: requestedRevision,
+            requestedWindowId: requestedWindowId,
+            points: [(x: x, y: y)],
+            currentWindow: currentWindow,
+            errorCodePrefix: "POINTER_CLICK",
+            now: now,
+            maxAgeSeconds: maxAgeSeconds
+        )
     }
 
     private func requiredNumber(_ value: JSONValue?, name: String) throws -> Double {

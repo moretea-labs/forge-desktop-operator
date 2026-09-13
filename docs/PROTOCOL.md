@@ -18,6 +18,10 @@ Example request:
 {"id":"request-1","method":"handshake","params":{}}
 ```
 
+## Bounded native pointer drag
+
+`desktop_pointer_drag` is a provider-local physical-input action under `desktop.interact`. The provider receives one process-local interaction id, exact window id, fresh visual revision, two provider-internal points, optional mouse button, and bounded step count. It refuses background input, stale/mismatched capture evidence, changed/off-screen windows, or any endpoint outside the authorized exact window. Execution is serialized by the same process-wide physical-input lock as pointer click and reuses `InputDriver.drag`; it creates no durable target/session authority. ChatGPT-facing Forge policy must derive coordinates from freshly observed Accessibility refs rather than accepting raw caller coordinates.
+
 ## Provider-local interaction bindings
 
 `desktop_session_open` creates or reuses a process-local provider binding to a running application. The returned interaction id is not durable Computer authority. Provider restart intentionally drops interaction ids, AX refs, snapshot revisions, and screenshot evidence; Forge must rebind and observe again from its own durable Computer target.

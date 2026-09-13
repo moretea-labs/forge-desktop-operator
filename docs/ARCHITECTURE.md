@@ -25,6 +25,8 @@ desktop-operator LaunchAgent
       +-- ephemeral AX / visual bindings
 ```
 
+Native click and drag share one physical-pointer authority: the application must already be foreground, the target CGWindow must match a fresh exact-window screenshot revision, every pointer endpoint must remain inside that window, and the provider rechecks the window immediately before emitting CGEvents. Both operations serialize through the same process-wide physical-input lock; drag reuses the existing `InputDriver.drag` primitive and adds no new durable state or controller authority.
+
 The service is installed as a user LaunchAgent because it must run in the logged-in GUI session. It is never installed as a root LaunchDaemon.
 
 ## Authority boundary
