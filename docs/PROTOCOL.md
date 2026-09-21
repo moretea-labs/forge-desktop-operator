@@ -24,7 +24,9 @@ Example request:
 
 ## Provider-local interaction bindings
 
-`desktop_session_open` creates or reuses a process-local provider binding to a running application. The returned interaction id is not durable Computer authority. Provider restart intentionally drops interaction ids, AX refs, snapshot revisions, and screenshot evidence; Forge must rebind and observe again from its own durable Computer target.
+`desktop_session_open` creates or reuses a process-local provider binding to a running application. Its result also reports `applicationOwnership` (`preexisting` or `provider_launched`) and, only for a provider-launched process, the exact `ownedProcessIdentifier`. These are native launch facts, not durable ownership authority. Reusing the same in-process session preserves its original launch facts; a process-id rebind invalidates provider-local launch ownership. Provider restart intentionally drops interaction ids, launch provenance, AX refs, snapshot revisions, and screenshot evidence; Forge must rebind and observe again from its own durable Computer target.
+
+`desktop_session_close` remains non-terminating by default. Forge may additionally send `terminate_owned_pid` after its durable target authority decides that the exact process is still Forge-owned and no other target needs it. Desktop Operator compares that pid with the live bound session and terminates only that exact process after stable application-identity validation. A rebound pid is never terminated by bundle/name fallback.
 
 `desktop_observe` and `computer.element.observe.v2` create an observation epoch. Element refs such as `ax_7_24` and AX window refs are valid only for the exact interaction/application/window context and `snapshotRevision` that produced them. A new observation replaces the ref registry.
 

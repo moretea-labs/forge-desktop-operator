@@ -4,6 +4,22 @@ import CoreGraphics
 import Darwin
 import Foundation
 
+public enum DesktopApplicationLaunchOwnership: String, Codable, Equatable, Sendable {
+    case preexisting
+    case providerLaunched = "provider_launched"
+}
+
+public struct ApplicationLaunchResult {
+    public let application: NSRunningApplication
+    public let ownership: DesktopApplicationLaunchOwnership
+    public let ownedProcessIdentifier: Int32?
+}
+
+public enum ExactApplicationTerminationOutcome: String, Equatable, Sendable {
+    case terminated
+    case alreadyStopped = "already_stopped"
+}
+
 public enum ApplicationDriver {
     public static func findRunning(bundleIdentifier: String?, appName: String?) -> NSRunningApplication? {
         if let bundleIdentifier {
@@ -265,9 +281,9 @@ public enum ApplicationDriver {
         )
     }
 
-    public static func ensureRunning(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> NSRunningApplication {
+    public static func ensureRunningWithProvenance(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> ApplicationLaunchResult {
         if let running = findRunning(bundleIdentifier: bundleIdentifier, appName: appName) {
-            return running
+            return ApplicationLaunchResult(application: running, ownership: .preexisting, ownedProcessIdentifier: nil)
         }
         guard launch else {
             throw PluginError(code: "APP_NOT_RUNNING", message: "Target application is not running", retryable: true, domain: "application")
@@ -282,7 +298,8 @@ public enum ApplicationDriver {
         // preserves the Desktop Operator invariant that automation never steals
         // foreground focus.
         if let applicationURL = installedApplicationURL(bundleIdentifier: bundleIdentifier, appName: appName) {
-            return try launchSilently(applicationURL: applicationURL)
+            let application = try launchSilently(applicationURL: applicationURL)
+            return ApplicationLaunchResult(application: application, ownership: .providerLaunched, ownedProcessIdentifier: application.processIdentifier)
         }
 
         // Keep the previous generic fallback for applications that are discoverable
@@ -311,12 +328,47 @@ public enum ApplicationDriver {
         let deadline = Date().addingTimeInterval(8)
         repeat {
             if let running = findRunning(bundleIdentifier: bundleIdentifier, appName: appName) {
-                return running
+                return ApplicationLaunchResult(application: running, ownership: .providerLaunched, ownedProcessIdentifier: running.processIdentifier)
             }
             Thread.sleep(forTimeInterval: 0.1)
         } while Date() < deadline
 
         throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
+    }
+
+    public static func ensureRunning(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> NSRunningApplication {
+        try ensureRunningWithProvenance(bundleIdentifier: bundleIdentifier, appName: appName, launch: launch).application
+    }
+
+    public static func terminateExact(
+        pid: Int32,
+        bundleIdentifier: String?,
+        appName: String?,
+        timeoutSeconds: TimeInterval = 2
+    ) throws -> ExactApplicationTerminationOutcome {
+        guard processIsAlive(pid) else { return .alreadyStopped }
+        guard let application = NSRunningApplication(processIdentifier: pid), !application.isTerminated else {
+            return .alreadyStopped
+        }
+        if let bundleIdentifier, application.bundleIdentifier != bundleIdentifier {
+            throw PluginError(code: "APP_TERMINATION_IDENTITY_MISMATCH", message: "Exact termination pid no longer belongs to the authorized application bundle", retryable: false, domain: "application")
+        }
+        if bundleIdentifier == nil, let appName,
+           application.localizedName?.caseInsensitiveCompare(appName) != .orderedSame {
+            throw PluginError(code: "APP_TERMINATION_IDENTITY_MISMATCH", message: "Exact termination pid no longer belongs to the authorized application name", retryable: false, domain: "application")
+        }
+        guard application.terminate() else {
+            throw PluginError(code: "APP_TERMINATION_REJECTED", message: "macOS rejected the exact application termination request", retryable: true, domain: "application")
+        }
+        let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
+        while Date() < deadline {
+            if !processIsAlive(pid) || application.isTerminated { return .terminated }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
+        }
+        guard !processIsAlive(pid) || application.isTerminated else {
+            throw PluginError(code: "APP_TERMINATION_TIMEOUT", message: "The exact application process remained alive after a graceful termination request", retryable: true, domain: "application")
+        }
+        return .terminated
     }
 
     static func parseLaunchServicesFrontmostPID(_ output: String) -> Int32? {

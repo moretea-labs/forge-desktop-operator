@@ -10,6 +10,8 @@ public struct DesktopSessionRecord: Codable, Equatable, Sendable {
     public let createdAt: Date
     public var lastObservedAt: Date?
     public var snapshotRevision: Int
+    public var applicationOwnership: DesktopApplicationLaunchOwnership = .preexisting
+    public var ownedProcessIdentifier: Int32? = nil
 }
 
 public struct DesktopVisualEvidence: Equatable, Sendable {
@@ -60,7 +62,12 @@ public final class DesktopSessionStore {
         return sessions.count
     }
 
-    public func create(application: NSRunningApplication, reuseExisting: Bool = true) throws -> DesktopSessionState {
+    public func create(
+        application: NSRunningApplication,
+        reuseExisting: Bool = true,
+        applicationOwnership: DesktopApplicationLaunchOwnership = .preexisting,
+        ownedProcessIdentifier: Int32? = nil
+    ) throws -> DesktopSessionState {
         guard !application.isTerminated else {
             throw PluginError(code: "APP_TERMINATED", message: "The selected application is no longer running", retryable: true)
         }
@@ -75,6 +82,12 @@ public final class DesktopSessionStore {
             }
             return existing
         }
+        if applicationOwnership == .providerLaunched, ownedProcessIdentifier != application.processIdentifier {
+            throw PluginError(code: "APP_LAUNCH_PROVENANCE_INVALID", message: "Provider-launched session ownership requires the exact launched process identifier", retryable: false, domain: "session")
+        }
+        if applicationOwnership == .preexisting, ownedProcessIdentifier != nil {
+            throw PluginError(code: "APP_LAUNCH_PROVENANCE_INVALID", message: "Preexisting application sessions cannot claim an owned process identifier", retryable: false, domain: "session")
+        }
         let id = "desk_\(UUID().uuidString.lowercased())"
         let record = DesktopSessionRecord(
             interactionId: id,
@@ -83,7 +96,9 @@ public final class DesktopSessionStore {
             appName: application.localizedName ?? application.bundleIdentifier ?? "Unknown",
             createdAt: Date(),
             lastObservedAt: nil,
-            snapshotRevision: 0
+            snapshotRevision: 0,
+            applicationOwnership: applicationOwnership,
+            ownedProcessIdentifier: ownedProcessIdentifier
         )
         let state = DesktopSessionState(record: record)
         sessions[id] = state
@@ -106,7 +121,7 @@ public final class DesktopSessionStore {
             )
         }
         if rebound.pid != current.pid {
-            let replacement = restoredState(from: rebound)
+            let replacement = restoredState(from: rebound, invalidateApplicationOwnership: true)
             sessions[id] = replacement
             return replacement
         }
@@ -165,10 +180,14 @@ public final class DesktopSessionStore {
             .first
     }
 
-    private func restoredState(from record: DesktopSessionRecord) -> DesktopSessionState {
+    private func restoredState(from record: DesktopSessionRecord, invalidateApplicationOwnership: Bool = false) -> DesktopSessionState {
         var reset = record
         reset.lastObservedAt = nil
         reset.snapshotRevision = 0
+        if invalidateApplicationOwnership {
+            reset.applicationOwnership = .preexisting
+            reset.ownedProcessIdentifier = nil
+        }
         return DesktopSessionState(record: reset)
     }
 }

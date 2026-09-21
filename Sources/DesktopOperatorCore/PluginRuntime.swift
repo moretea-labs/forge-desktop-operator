@@ -122,15 +122,20 @@ public final class PluginRuntime {
             let activate = object["activate"]?.boolValue ?? false
             let reuseExisting = object["reuse_existing"]?.boolValue ?? true
             let openSession: () throws -> JSONValue = {
-                let application = try ApplicationDriver.ensureRunning(
+                let launchResult = try ApplicationDriver.ensureRunningWithProvenance(
                     bundleIdentifier: bundleId,
                     appName: appName,
                     launch: launch
                 )
                 if activate {
-                    try ApplicationDriver.activate(application)
+                    try ApplicationDriver.activate(launchResult.application)
                 }
-                return try JSONValue.encode(self.sessions.create(application: application, reuseExisting: reuseExisting).record)
+                return try JSONValue.encode(self.sessions.create(
+                    application: launchResult.application,
+                    reuseExisting: reuseExisting,
+                    applicationOwnership: launchResult.ownership,
+                    ownedProcessIdentifier: launchResult.ownedProcessIdentifier
+                ).record)
             }
             return try activate ? withPhysicalInputLock(openSession) : openSession()
         case "desktop_observe":
@@ -401,7 +406,33 @@ public final class PluginRuntime {
             return try executeBatch(object)
         case "desktop_session_close":
             guard let interactionId = object["interaction_id"]?.stringValue else { throw PluginError.invalidArguments("desktop_session_close requires interaction_id") }
-            return .object(["closed": .bool(try sessions.remove(interactionId)), "interaction_id": .string(interactionId)])
+            let terminateOwnedPid = object["terminate_owned_pid"]?.intValue
+            if let terminateOwnedPid, terminateOwnedPid <= 0 || terminateOwnedPid > Int(Int32.max) {
+                throw PluginError.invalidArguments("terminate_owned_pid must be a positive 32-bit process identifier")
+            }
+            var terminationOutcome = "not_requested"
+            if let terminateOwnedPid {
+                do {
+                    let session = try sessions.get(interactionId)
+                    let record = session.withLock { session.record }
+                    if record.pid == Int32(terminateOwnedPid) {
+                        terminationOutcome = try ApplicationDriver.terminateExact(
+                            pid: record.pid,
+                            bundleIdentifier: record.bundleIdentifier,
+                            appName: record.appName
+                        ).rawValue
+                    } else {
+                        terminationOutcome = "pid_mismatch"
+                    }
+                } catch let error as PluginError where error.code == "SESSION_NOT_FOUND" || error.code == "SESSION_TARGET_NOT_RUNNING" {
+                    terminationOutcome = "session_absent"
+                }
+            }
+            return .object([
+                "closed": .bool(try sessions.remove(interactionId)),
+                "interaction_id": .string(interactionId),
+                "termination_outcome": .string(terminationOutcome)
+            ])
         default:
             throw PluginError.unsupported("Unknown action \(action)")
         }

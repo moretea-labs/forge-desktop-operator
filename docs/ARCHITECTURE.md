@@ -39,7 +39,7 @@ Forge is the sole owner of durable Computer semantics. Desktop Operator must not
 - Work, Controller, Workflow, approval, or scheduling decisions;
 - semantic transaction reconciliation, retry ownership, or outcome authority.
 
-Desktop Operator owns only native mechanics and rebuildable provider-local bindings. An interaction id, AX element ref, AX window ref, snapshot revision, or visual evidence record is process-local provider state. Provider restart drops those bindings and Forge must rebind/re-observe from its durable target authority.
+Desktop Operator owns only native mechanics and rebuildable provider-local bindings. An interaction id, native launch-provenance observation, AX element ref, AX window ref, snapshot revision, or visual evidence record is process-local provider state. Provider restart drops those bindings and Forge must rebind/re-observe from its durable target authority. When Desktop Operator launches an application it reports the exact launched pid as a fact; Forge decides whether that process remains Forge-owned. Cleanup is therefore explicit and exact-pid fenced rather than inferred from bundle id, app name, or provider session lifetime.
 
 A successful semantic element mutation retires the observation epoch that authorized it. Old element/window refs then fail closed as stale; callers must re-observe. Bounds are observation metadata and never element identity or pointer authorization.
 

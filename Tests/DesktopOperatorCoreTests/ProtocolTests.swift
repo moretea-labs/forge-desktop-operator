@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Testing
 @testable import DesktopOperatorCore
@@ -26,6 +27,26 @@ import Testing
     #expect(response.result?["browserAutomationProtocolVersion"]?.intValue == 1)
     #expect(response.result?["browserAutomationActions"]?.arrayValue?.compactMap(\.stringValue).contains("list_tabs") == true)
     #expect(response.result?["browserAutomationActions"]?.arrayValue?.compactMap(\.stringValue).contains("trusted_input") == true)
+}
+
+@Test func desktopSessionClosePidMismatchNeverTerminatesAnotherProcess() throws {
+    guard let application = NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated }) else { return }
+    let sessions = DesktopSessionStore(applicationResolver: { $0 })
+    let state = try sessions.create(
+        application: application,
+        reuseExisting: false,
+        applicationOwnership: .providerLaunched,
+        ownedProcessIdentifier: application.processIdentifier
+    )
+    let runtime = PluginRuntime(socketPath: "/tmp/desktop-operator-test.sock", sessions: sessions)
+    let mismatchedPid = application.processIdentifier == Int32.max ? application.processIdentifier - 1 : application.processIdentifier + 1
+    let result = try runtime.execute(action: "desktop_session_close", arguments: .object([
+        "interaction_id": .string(state.record.interactionId),
+        "terminate_owned_pid": .number(Double(mismatchedPid))
+    ]))
+    #expect(result["closed"]?.boolValue == true)
+    #expect(result["termination_outcome"]?.stringValue == "pid_mismatch")
+    #expect(ApplicationDriver.processIsAlive(application.processIdentifier))
 }
 
 @Test func unknownMethodIsStructuredError() {

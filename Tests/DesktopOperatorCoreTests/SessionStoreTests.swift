@@ -25,12 +25,17 @@ import Testing
     }
 }
 
-@Test func desktopSessionStoreReusePreservesFreshInProcessVisualEvidence() throws {
+@Test func desktopSessionStoreReusePreservesLaunchOwnershipAndFreshVisualEvidence() throws {
     let store = DesktopSessionStore(applicationResolver: { $0 })
     guard let application = NSWorkspace.shared.runningApplications.first(where: { !$0.isTerminated }) else {
         return
     }
-    let first = try store.create(application: application, reuseExisting: true)
+    let first = try store.create(
+        application: application,
+        reuseExisting: true,
+        applicationOwnership: .providerLaunched,
+        ownedProcessIdentifier: application.processIdentifier
+    )
     let evidence = DesktopVisualEvidence(
         revision: 4,
         windowId: 123,
@@ -42,6 +47,8 @@ import Testing
 
     let reused = try store.create(application: application, reuseExisting: true)
     #expect(reused === first)
+    #expect(reused.record.applicationOwnership == .providerLaunched)
+    #expect(reused.record.ownedProcessIdentifier == application.processIdentifier)
     #expect(reused.visualRevision == 4)
     #expect(reused.lastVisualEvidence == evidence)
 }
@@ -69,6 +76,8 @@ import Testing
     let rebound = try store.get(state.record.interactionId)
     #expect(rebound !== state)
     #expect(rebound.record.pid == nextPid)
+    #expect(rebound.record.applicationOwnership == .preexisting)
+    #expect(rebound.record.ownedProcessIdentifier == nil)
     #expect(rebound.record.snapshotRevision == 0)
     #expect(rebound.elements.isEmpty)
     #expect(rebound.elementWindowRefs.isEmpty)
