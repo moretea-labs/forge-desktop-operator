@@ -99,3 +99,8 @@ The advertised Unified Computer capabilities are `computer.observe.v1`, `compute
 ### Console credential locality
 
 The protected console-unlock boundary does not require ChatGPT or Forge Runtime to transport the macOS login password. Desktop Operator owns a short-lived, process-local credential vault populated only from a provider-local secure prompt while the console is unlocked. Forge receives only an opaque single-use handle. This keeps raw credentials out of MCP arguments, plugin receipts, Process/Work state, logs, files, clipboard state, and replayable jobs while preserving the existing loginwindow-only input and postcondition checks.
+
+
+## Console availability recovery
+
+Desktop Operator owns the native secret boundary for unattended console recovery. Forge owns semantic authorization and decides when an authorized Work requires foreground desktop availability; it never owns the macOS login credential. Enrollment/revocation are explicit provider lifecycle actions. The enrolled credential is stored only in device-local, non-synchronizing macOS Keychain storage and is read only inside Desktop Operator during a bounded recovery attempt. Temporary handle-based unlock and enrolled unattended recovery share one loginwindow target validation, Accessibility boundary, replay/rate-limit gate, and postcondition verification path.

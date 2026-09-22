@@ -99,3 +99,8 @@ Credential material is request-memory only. It is not part of manifest state, pl
 ## Protected console credential preparation
 
 `computer.console.unlock.v1` exposes two protected actions. `prepare_unlock_console` is valid only while the console is unlocked; it shows a provider-local secure password field and returns an opaque `credential_handle` plus a bounded expiry. The credential never enters the socket request or response. `unlock_console` consumes that handle exactly once after the console is locked, then performs the existing loginwindow identity checks, credential text + Return input, and authoritative unlocked postcondition verification. Provider restart or handle expiry invalidates the preparation.
+
+
+## Unattended console recovery
+
+`computer.console.unlock.v1` additionally exposes `console_unlock_enroll`, `console_unlock_status`, `console_unlock_recover`, and `console_unlock_revoke`. These actions never accept a password argument. Enrollment prompts locally in Desktop Operator while the console is unlocked and persists the credential only in provider-owned macOS Keychain storage. Recovery may run after the console is already locked, consumes one explicit single-use authorization, and returns only verified unlock state. Status returns enrollment/availability metadata only; revoke deletes the provider-local Keychain item. The existing `prepare_unlock_console` + opaque-handle `unlock_console` flow remains unchanged for short-lived temporary authorization.

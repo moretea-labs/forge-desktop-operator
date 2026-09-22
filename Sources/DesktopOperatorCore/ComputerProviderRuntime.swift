@@ -30,7 +30,7 @@ final class ComputerProviderRuntime {
                 capabilityId: ComputerProviderProtocol.consoleUnlockCapability,
                 protocolVersion: ComputerProviderProtocol.legacyProtocolVersion,
                 method: ComputerProviderProtocol.executionMethod,
-                actions: ["prepare_unlock_console", "unlock_console"]
+                actions: ["prepare_unlock_console", "unlock_console", "console_unlock_enroll", "console_unlock_status", "console_unlock_recover", "console_unlock_revoke"]
             ),
             ComputerCapabilityRuntimeDescriptor(
                 capabilityId: ComputerProviderProtocol.captureCapability,
@@ -82,8 +82,8 @@ final class ComputerProviderRuntime {
         switch params.capability {
         case ComputerProviderProtocol.consoleUnlockCapability:
             guard let action = params.arguments["action"]?.stringValue,
-                  ["prepare_unlock_console", "unlock_console"].contains(action) else {
-                throw PluginError(code: "COMPUTER_ACTION_UNSUPPORTED", message: "computer.console.unlock.v1 exposes prepare_unlock_console and unlock_console only", retryable: false, domain: "computer")
+                  ["prepare_unlock_console", "unlock_console", "console_unlock_enroll", "console_unlock_status", "console_unlock_recover", "console_unlock_revoke"].contains(action) else {
+                throw PluginError(code: "COMPUTER_ACTION_UNSUPPORTED", message: "computer.console.unlock.v1 exposes temporary prepare/unlock plus unattended enroll/status/recover/revoke actions only", retryable: false, domain: "computer")
             }
             return try consoleUnlock(params.arguments)
         case ComputerProviderProtocol.elementObserveCapability:

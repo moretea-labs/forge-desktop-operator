@@ -17,7 +17,8 @@ let package = Package(
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("CoreGraphics"),
-                .linkedFramework("ImageIO")
+                .linkedFramework("ImageIO"),
+                .linkedFramework("Security")
             ]
         ),
         .executableTarget(

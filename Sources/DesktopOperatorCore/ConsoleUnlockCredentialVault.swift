@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 
 final class ConsoleUnlockCredentialVault: @unchecked Sendable {
     private struct Entry {
@@ -59,6 +60,112 @@ final class ConsoleUnlockCredentialVault: @unchecked Sendable {
     }
 }
 
+protocol ConsoleUnlockRecoveryCredentialStoring: Sendable {
+    func isEnrolled() throws -> Bool
+    func read() throws -> String?
+    func write(_ credential: String) throws
+    func delete() throws
+}
+
+final class ConsoleUnlockRecoveryCredentialStore: ConsoleUnlockRecoveryCredentialStoring, @unchecked Sendable {
+    private let service: String
+    private let account: String
+
+    init(
+        service: String = "com.moretea.forge.desktop-operator.console-unlock",
+        account: String = NSUserName()
+    ) {
+        self.service = service
+        self.account = account
+    }
+
+    func isEnrolled() throws -> Bool {
+        var query = identityQuery()
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+        let status = SecItemCopyMatching(query as CFDictionary, nil)
+        switch status {
+        case errSecSuccess:
+            return true
+        case errSecItemNotFound:
+            return false
+        default:
+            throw keychainError("inspect", status)
+        }
+    }
+
+    func read() throws -> String? {
+        var query = identityQuery()
+        query[kSecReturnData as String] = kCFBooleanTrue
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        switch status {
+        case errSecSuccess:
+            guard let data = result as? Data,
+                  let credential = String(data: data, encoding: .utf8),
+                  !credential.isEmpty else {
+                throw PluginError(
+                    code: "CONSOLE_UNLOCK_RECOVERY_CREDENTIAL_INVALID",
+                    message: "The provider-local unattended-unlock credential is unreadable.",
+                    retryable: false,
+                    domain: "authorization"
+                )
+            }
+            return credential
+        case errSecItemNotFound:
+            return nil
+        default:
+            throw keychainError("read", status)
+        }
+    }
+
+    func write(_ credential: String) throws {
+        let data = Data(credential.utf8)
+        var attributes = identityQuery()
+        attributes[kSecValueData as String] = data
+        attributes[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        attributes[kSecAttrSynchronizable as String] = kCFBooleanFalse
+
+        let status = SecItemAdd(attributes as CFDictionary, nil)
+        if status == errSecSuccess { return }
+        if status == errSecDuplicateItem {
+            let update: [String: Any] = [
+                kSecValueData as String: data,
+                kSecAttrAccessible as String: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            ]
+            let updateStatus = SecItemUpdate(identityQuery() as CFDictionary, update as CFDictionary)
+            guard updateStatus == errSecSuccess else { throw keychainError("update", updateStatus) }
+            return
+        }
+        throw keychainError("write", status)
+    }
+
+    func delete() throws {
+        let status = SecItemDelete(identityQuery() as CFDictionary)
+        guard status == errSecSuccess || status == errSecItemNotFound else {
+            throw keychainError("delete", status)
+        }
+    }
+
+    private func identityQuery() -> [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+    }
+
+    private func keychainError(_ operation: String, _ status: OSStatus) -> PluginError {
+        PluginError(
+            code: "CONSOLE_UNLOCK_RECOVERY_KEYCHAIN_UNAVAILABLE",
+            message: "macOS Keychain could not \(operation) the provider-local unattended-unlock credential (status \(status)).",
+            retryable: status == errSecInteractionNotAllowed,
+            domain: "authorization"
+        )
+    }
+}
+
 enum ConsoleUnlockCredentialPrompt {
     static func prompt() throws -> String {
         guard !ApplicationDriver.currentSessionIsLocked() else {
@@ -101,10 +208,10 @@ enum ConsoleUnlockCredentialPrompt {
 
         let alert = NSAlert()
         alert.alertStyle = .informational
-        alert.messageText = "Prepare Forge console unlock"
-        alert.informativeText = "Enter the macOS login password locally. It stays only in Forge Desktop Operator memory, expires shortly, and is consumed after one unlock attempt."
+        alert.messageText = "Authorize Forge console recovery"
+        alert.informativeText = "Enter the macOS login password locally. Forge Desktop Operator keeps it inside the native provider boundary; temporary preparation stays in memory and unattended enrollment stores it only in this Mac's Keychain."
         alert.accessoryView = field
-        alert.addButton(withTitle: "Prepare")
+        alert.addButton(withTitle: "Authorize")
         alert.addButton(withTitle: "Cancel")
         alert.window.initialFirstResponder = field
 
@@ -115,7 +222,7 @@ enum ConsoleUnlockCredentialPrompt {
         guard response == .alertFirstButtonReturn else {
             throw PluginError(
                 code: "CONSOLE_UNLOCK_PREPARATION_CANCELLED",
-                message: "Local console-unlock credential preparation was cancelled.",
+                message: "Local console-unlock credential authorization was cancelled.",
                 retryable: false,
                 domain: "authorization"
             )

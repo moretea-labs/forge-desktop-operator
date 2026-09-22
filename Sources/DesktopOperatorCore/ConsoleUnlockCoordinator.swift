@@ -64,6 +64,7 @@ final class ConsoleUnlockCoordinator {
 
     private let gate: ConsoleUnlockAttemptGate
     private let credentialVault: ConsoleUnlockCredentialVault
+    private let recoveryCredentialStore: ConsoleUnlockRecoveryCredentialStoring
     private let isLocked: LockedProvider
     private let loginwindow: LoginwindowProvider
     private let accessibilityTrusted: AccessibilityProvider
@@ -77,6 +78,7 @@ final class ConsoleUnlockCoordinator {
     init(
         gate: ConsoleUnlockAttemptGate = ConsoleUnlockAttemptGate(),
         credentialVault: ConsoleUnlockCredentialVault = ConsoleUnlockCredentialVault(),
+        recoveryCredentialStore: ConsoleUnlockRecoveryCredentialStoring = ConsoleUnlockRecoveryCredentialStore(),
         isLocked: @escaping LockedProvider = ApplicationDriver.currentSessionIsLocked,
         loginwindow: @escaping LoginwindowProvider = ConsoleUnlockCoordinator.currentLoginwindow,
         accessibilityTrusted: @escaping AccessibilityProvider = { AXIsProcessTrusted() },
@@ -89,6 +91,7 @@ final class ConsoleUnlockCoordinator {
     ) {
         self.gate = gate
         self.credentialVault = credentialVault
+        self.recoveryCredentialStore = recoveryCredentialStore
         self.isLocked = isLocked
         self.loginwindow = loginwindow
         self.accessibilityTrusted = accessibilityTrusted
@@ -111,10 +114,18 @@ final class ConsoleUnlockCoordinator {
             return try prepare(invocationId: invocationId)
         case "unlock_console":
             return try unlock(object: object, invocationId: invocationId)
+        case "console_unlock_enroll":
+            return try enrollRecovery(invocationId: invocationId)
+        case "console_unlock_status":
+            return try recoveryStatus(invocationId: invocationId)
+        case "console_unlock_recover":
+            return try recoverUnattended(invocationId: invocationId)
+        case "console_unlock_revoke":
+            return try revokeRecovery(invocationId: invocationId)
         default:
             throw PluginError(
                 code: "COMPUTER_ACTION_UNSUPPORTED",
-                message: "computer.console.unlock.v1 exposes prepare_unlock_console and unlock_console only.",
+                message: "computer.console.unlock.v1 exposes temporary prepare/unlock plus unattended enroll/status/recover/revoke actions only.",
                 retryable: false,
                 domain: "computer"
             )
@@ -191,6 +202,46 @@ final class ConsoleUnlockCoordinator {
             )
         }
 
+        return try performUnlock(credential: credential, expectedTarget: target)
+    }
+
+    private func performUnlock(
+        credential: String,
+        expectedTarget: ConsoleLoginwindowIdentity? = nil
+    ) throws -> JSONValue {
+        guard isLocked() else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_CONSOLE_NOT_LOCKED",
+                message: "Console unlock is valid only while the current macOS console is actually locked.",
+                retryable: false,
+                domain: "console"
+            )
+        }
+        guard accessibilityTrusted() else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_ACCESSIBILITY_NOT_GRANTED",
+                message: "Forge Desktop Operator must retain its own Accessibility permission before protected console input can be attempted.",
+                retryable: false,
+                domain: "tcc"
+            )
+        }
+        guard let target = expectedTarget ?? loginwindow() else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_LOGINWINDOW_UNAVAILABLE",
+                message: "The locked console does not expose the current protected macOS loginwindow surface.",
+                retryable: false,
+                domain: "console"
+            )
+        }
+        guard isLocked(), loginwindow() == target else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_STALE_LOGINWINDOW",
+                message: "The protected lock-screen target changed before credential input; no input was performed.",
+                retryable: false,
+                domain: "console"
+            )
+        }
+
         try gate.consumeAttempt(at: now())
         try submitCredential(credential)
 
@@ -216,10 +267,62 @@ final class ConsoleUnlockCoordinator {
 
         throw PluginError(
             code: "CONSOLE_UNLOCK_CREDENTIAL_NOT_ACCEPTED",
-            message: "The credential submission completed but the authoritative console lock state did not change. The credential may have been rejected or protected loginwindow input may have been isolated by macOS.",
+            message: "The provider-local credential submission completed but the authoritative console lock state did not change.",
             retryable: false,
             domain: "console"
         )
+    }
+
+    private func enrollRecovery(invocationId: String) throws -> JSONValue {
+        try gate.consumeAuthorization(invocationId: invocationId, at: now())
+        guard !isLocked() else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_ENROLL_REQUIRES_UNLOCKED_CONSOLE",
+                message: "Enable unattended console recovery while the macOS console is unlocked.",
+                retryable: false,
+                domain: "console"
+            )
+        }
+        let credential = try boundedCredential(promptCredential())
+        try recoveryCredentialStore.write(credential)
+        return .object([
+            "enrolled": .bool(true),
+            "available": .bool(true),
+            "persistence": .string("macos_keychain_device_only"),
+        ])
+    }
+
+    private func recoveryStatus(invocationId: String) throws -> JSONValue {
+        try gate.consumeAuthorization(invocationId: invocationId, at: now())
+        let enrolled = try recoveryCredentialStore.isEnrolled()
+        return .object([
+            "enrolled": .bool(enrolled),
+            "available": .bool(enrolled),
+            "persistence": .string("macos_keychain_device_only"),
+        ])
+    }
+
+    private func revokeRecovery(invocationId: String) throws -> JSONValue {
+        try gate.consumeAuthorization(invocationId: invocationId, at: now())
+        try recoveryCredentialStore.delete()
+        return .object([
+            "enrolled": .bool(false),
+            "available": .bool(false),
+            "revoked": .bool(true),
+        ])
+    }
+
+    private func recoverUnattended(invocationId: String) throws -> JSONValue {
+        try gate.consumeAuthorization(invocationId: invocationId, at: now())
+        guard let credential = try recoveryCredentialStore.read() else {
+            throw PluginError(
+                code: "CONSOLE_UNLOCK_RECOVERY_NOT_ENROLLED",
+                message: "Unattended console recovery is not enrolled on this Mac.",
+                retryable: false,
+                domain: "authorization"
+            )
+        }
+        return try performUnlock(credential: try boundedCredential(credential))
     }
 
     private func authorizedInvocationId(_ object: [String: JSONValue]) throws -> String {

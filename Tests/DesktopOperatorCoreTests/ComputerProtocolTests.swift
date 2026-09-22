@@ -408,7 +408,7 @@ import Testing
         BrowserAutomationCommandResult(status: 0, stdout: "ok")
     })
     #expect(runtime.capabilities.contains {
-        $0.capabilityId == ComputerProviderProtocol.consoleUnlockCapability && $0.actions == ["prepare_unlock_console", "unlock_console"]
+        $0.capabilityId == ComputerProviderProtocol.consoleUnlockCapability && $0.actions == ["prepare_unlock_console", "unlock_console", "console_unlock_enroll", "console_unlock_status", "console_unlock_recover", "console_unlock_revoke"]
     })
 
     let result = try runtime.execute(

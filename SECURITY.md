@@ -15,3 +15,10 @@ Each unlock attempt requires an explicit single-use authorization and an ephemer
 
 
 Raw console credentials are not part of the ChatGPT-facing contract. Before a protected unlock, Desktop Operator may collect the credential locally in an `NSSecureTextField` while the console is unlocked and return only an opaque, process-local, single-use handle. The credential is held only in provider memory for a bounded TTL, is replaced by newer preparation, and is removed when consumed. Provider restart invalidates every handle. The legacy raw-credential provider input remains compatibility-only for rolling upgrades and is not exposed by the current ChatGPT tool surface.
+
+
+## Unattended console recovery
+
+Unattended recovery is opt-in and provider-local. Enrollment occurs only while the user console is unlocked and collects the login credential through the native Desktop Operator secure prompt. Desktop Operator stores the credential only in a non-synchronizing, device-only macOS Keychain item configured for availability after the first user unlock. Forge Controller, MCP arguments, Work/Process state, receipts, audit records, and logs never receive the credential.
+
+A recovery invocation carries only explicit single-use authorization. The provider reads the enrolled credential locally, reuses the same loginwindow identity checks, Accessibility boundary, replay fence, bounded attempt rate, and postcondition verification as temporary handle-based unlock, and returns only bounded status. Revocation deletes the Keychain item. The existing short-lived prepare/opaque-handle flow remains the preferred path for temporary authorization and does not depend on enrollment.
