@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 import Foundation
 
 struct BrowserAutomationCommandResult: Equatable {
@@ -66,6 +67,8 @@ final class BrowserAutomationBroker {
     ]
     private static let defaultTimeoutMs = 5_000
     private static let maxTimeoutMs = 30_000
+    private static let terminateGraceMs = 250
+    private static let forcedKillGraceMs = 750
     private static let maxURLBytes = 65_536
     private static let maxJavaScriptBytes = 768 * 1_024
     private static let maxCaptureBytes = 3 * 1_048_576
@@ -549,7 +552,8 @@ final class BrowserAutomationBroker {
         }
     }
 
-    private static func runCommand(_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult {
+    static func runCommand(_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult {
+        let startedAt = Date()
         let tempRoot = FileManager.default.temporaryDirectory
         let stdoutURL = tempRoot.appendingPathComponent("forge-desktop-broker-stdout-\(UUID().uuidString)")
         let stderrURL = tempRoot.appendingPathComponent("forge-desktop-broker-stderr-\(UUID().uuidString)")
@@ -575,12 +579,38 @@ final class BrowserAutomationBroker {
         environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         process.environment = environment
         try process.run()
-        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1_000)
+        let deadline = startedAt.addingTimeInterval(Double(timeoutMs) / 1_000)
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         if process.isRunning {
+            let pid = process.processIdentifier
             process.terminate()
-            process.waitUntilExit()
-            throw PluginError(code: "BROWSER_AUTOMATION_TIMEOUT", message: "Browser automation command timed out", retryable: true, domain: "browser")
+            let terminateDeadline = Date().addingTimeInterval(Double(Self.terminateGraceMs) / 1_000)
+            while process.isRunning && Date() < terminateDeadline { Thread.sleep(forTimeInterval: 0.01) }
+
+            var forcedKill = false
+            if process.isRunning {
+                forcedKill = true
+                _ = Darwin.kill(pid, SIGKILL)
+                let killDeadline = Date().addingTimeInterval(Double(Self.forcedKillGraceMs) / 1_000)
+                while process.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            }
+            let processExited = !process.isRunning
+            if processExited { process.waitUntilExit() }
+            let formatter = ISO8601DateFormatter()
+            throw PluginError(
+                code: "BROWSER_AUTOMATION_TIMEOUT",
+                message: "Browser automation command exceeded its deadline; bounded termination completed",
+                retryable: true,
+                domain: "browser",
+                details: .object([
+                    "owner": .string("process:\(pid)"),
+                    "started_at": .string(formatter.string(from: startedAt)),
+                    "deadline": .string(formatter.string(from: deadline)),
+                    "timeout_ms": .number(Double(timeoutMs)),
+                    "forced_kill": .bool(forcedKill),
+                    "process_exited": .bool(processExited),
+                ])
+            )
         }
         process.waitUntilExit()
         try stdoutHandle.synchronize()

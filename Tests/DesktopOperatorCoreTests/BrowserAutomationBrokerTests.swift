@@ -306,6 +306,26 @@ import Testing
     #expect(BrowserAutomationBroker.supportedActions.contains("trusted_input"))
 }
 
+@Test func browserAutomationCommandTimeoutForcesBoundedProcessTermination() throws {
+    let startedAt = Date()
+    do {
+        _ = try BrowserAutomationBroker.runCommand(
+            "/bin/sh",
+            ["-c", "trap '' TERM; exec /bin/sleep 5"],
+            50
+        )
+        Issue.record("expected browser automation timeout")
+    } catch let error as PluginError {
+        #expect(error.code == "BROWSER_AUTOMATION_TIMEOUT")
+        #expect(Date().timeIntervalSince(startedAt) < 2.0)
+        #expect(error.details?["owner"]?.stringValue?.hasPrefix("process:") == true)
+        #expect(error.details?["started_at"]?.stringValue != nil)
+        #expect(error.details?["deadline"]?.stringValue != nil)
+        #expect(error.details?["forced_kill"]?.boolValue == true)
+        #expect(error.details?["process_exited"]?.boolValue == true)
+    }
+}
+
 private final class BrowserRuntimeBox: @unchecked Sendable {
     let runtime: PluginRuntime
     init(_ runtime: PluginRuntime) { self.runtime = runtime }
