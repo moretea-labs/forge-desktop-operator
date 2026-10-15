@@ -34,6 +34,12 @@ struct BrowserAutomationTrustedInputCommand: Equatable {
 
 final class BrowserAutomationBroker {
     typealias CommandRunner = (_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult
+    typealias ChromeProcessProbe = () throws -> [ChromeProcessRoot]
+
+    struct ChromeProcessRoot: Equatable {
+        let pid: Int32
+        let headless: Bool
+    }
     typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
 
     private struct BrowserDefinition {
@@ -80,30 +86,36 @@ final class BrowserAutomationBroker {
     private let runner: CommandRunner
     private let frontmostBundleIdentifier: () -> String?
     private let trustedInputPerformer: TrustedInputPerformer
+    private let chromeProcessProbe: ChromeProcessProbe
 
     init() {
         self.runner = Self.runCommand
         self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
         self.trustedInputPerformer = Self.performTrustedInput
+        self.chromeProcessProbe = Self.liveChromeProcessRoots
     }
 
     init(
         runner: @escaping CommandRunner,
-        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
+        chromeProcessProbe: @escaping ChromeProcessProbe = { [ChromeProcessRoot(pid: 1, headless: false)] }
     ) {
         self.runner = runner
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         self.trustedInputPerformer = Self.performTrustedInput
+        self.chromeProcessProbe = chromeProcessProbe
     }
 
     init(
         runner: @escaping CommandRunner,
         frontmostBundleIdentifier: @escaping () -> String?,
-        trustedInputPerformer: @escaping TrustedInputPerformer
+        trustedInputPerformer: @escaping TrustedInputPerformer,
+        chromeProcessProbe: @escaping ChromeProcessProbe = { [ChromeProcessRoot(pid: 1, headless: false)] }
     ) {
         self.runner = runner
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         self.trustedInputPerformer = trustedInputPerformer
+        self.chromeProcessProbe = chromeProcessProbe
     }
 
     func execute(params: JSONValue) throws -> JSONValue {
@@ -119,6 +131,11 @@ final class BrowserAutomationBroker {
             throw invalid("BROWSER_AUTOMATION_PRODUCT_INVALID")
         }
         let target = try optionalRef(object["ref"])
+        // AppleScript application-name addressing cannot prove a specific PID.
+        // Even a headless CDP Chrome root may answer instead of the user's GUI.
+        if product == "chrome" && Self.supportedActions.contains(action) {
+            try requireUniqueChromeRoot()
+        }
 
         switch action {
         case "metadata":
@@ -304,6 +321,57 @@ final class BrowserAutomationBroker {
         guard !parts.isEmpty else { return value }
         parts[0] = frontmostBundleIdentifier() == browser.bundleIdentifier ? "true" : "false"
         return parts.joined(separator: separator)
+    }
+
+    static func chromeProcessRoots(psOutput: String) -> [ChromeProcessRoot] {
+        var roots: [ChromeProcessRoot] = []
+        let executableMarker = "/Contents/MacOS/Google Chrome"
+        for line in psOutput.split(separator: "\n") {
+            let fields = line.trimmingCharacters(in: .whitespaces)
+                .split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 2, let pid = Int32(fields[0]), pid > 0 else { continue }
+            let command = String(fields[1])
+            guard let marker = command.range(of: executableMarker) else { continue }
+            let path = command[..<marker.lowerBound]
+            let arguments = command[marker.upperBound...]
+            guard path.hasSuffix("/Google Chrome.app"),
+                  arguments.isEmpty || arguments.first?.isWhitespace == true else { continue }
+            // Helper/renderer paths cannot match the exact main executable.
+            let flags = arguments.split(whereSeparator: { $0.isWhitespace })
+            let headless = flags.contains { $0 == "--headless" || $0.hasPrefix("--headless=") }
+            roots.append(ChromeProcessRoot(pid: pid, headless: headless))
+        }
+        return roots
+    }
+
+    private static func liveChromeProcessRoots() throws -> [ChromeProcessRoot] {
+        let result = try runCommand("/bin/ps", ["-axo", "pid=,command="], 3_000)
+        guard result.status == 0, !result.stdout.isEmpty,
+              result.stdout.utf8.count < 8 * 1_048_576 else {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE",
+                              message: "Cannot establish the Chrome process roots before Apple Events.",
+                              retryable: true, domain: "browser")
+        }
+        return chromeProcessRoots(psOutput: result.stdout)
+    }
+
+    private func requireUniqueChromeRoot() throws {
+        let roots: [ChromeProcessRoot]
+        do { roots = try chromeProcessProbe() }
+        catch {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE",
+                              message: "Cannot establish Chrome process identity; refusing Apple Events.",
+                              retryable: true, domain: "browser")
+        }
+        guard roots.count == 1, roots.first?.headless == false else {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_TARGET_AMBIGUOUS",
+                              message: "AppleScript cannot identify the signed-in GUI Chrome when multiple or only headless app roots exist; no Apple Event was sent.",
+                              retryable: false, domain: "browser",
+                              details: .object([
+                                  "chromeRootCount": .number(Double(roots.count)),
+                                  "headlessRootCount": .number(Double(roots.filter { $0.headless }.count)),
+                              ]))
+        }
     }
 
     private func runAppleScript(_ script: String, args: [String], timeoutMs: Int) throws -> String {

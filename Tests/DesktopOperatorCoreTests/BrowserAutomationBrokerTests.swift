@@ -3,6 +3,69 @@ import Foundation
 import Testing
 @testable import DesktopOperatorCore
 
+@Test func browserAppleEventsChromeProcessRootParsingRejectsCompetingHeadlessRoot() {
+    let gui = "97438 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+    let headless = "28434 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless=new --user-data-dir=/tmp/test-profile"
+    let helper = "3939 /Applications/Google Chrome.app/Contents/Frameworks/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer"
+    let roots = BrowserAutomationBroker.chromeProcessRoots(psOutput: [gui, headless, helper].joined(separator: "\n"))
+    #expect(roots == [
+        .init(pid: 97438, headless: false),
+        .init(pid: 28434, headless: true),
+    ])
+    #expect(BrowserAutomationBroker.chromeProcessRoots(psOutput: helper).isEmpty)
+}
+
+@Test func browserAppleEventsChromeAmbiguityFailsBeforeAnyScript() throws {
+    let gui = BrowserAutomationBroker.ChromeProcessRoot(pid: 97438, headless: false)
+    let headless = BrowserAutomationBroker.ChromeProcessRoot(pid: 28434, headless: true)
+    for sample in [[], [headless], [gui, headless], [gui, gui]] {
+        var appleEventsSent = 0
+        let broker = BrowserAutomationBroker(runner: { _, _, _ in
+            appleEventsSent += 1
+            return BrowserAutomationCommandResult(status: 0, stdout: "ok")
+        }, chromeProcessProbe: { sample })
+        let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+            id: "chrome-ambiguous",
+            method: "macos_browser_automation",
+            params: .object([
+                "protocolVersion": .number(1),
+                "action": .string("metadata"),
+                "product": .string("chrome"),
+            ])
+        ))
+        #expect(!response.ok)
+        #expect(response.error?.code == "BROWSER_AUTOMATION_PROCESS_TARGET_AMBIGUOUS")
+        #expect(appleEventsSent == 0)
+    }
+}
+
+@Test func browserAppleEventsChromeSingleGuiRootStillRunsAndVivaldiIsIndependent() throws {
+    var calls = 0
+    let broker = BrowserAutomationBroker(runner: { _, _, _ in
+        calls += 1
+        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}Example\u{1e}0\u{1e}0\u{1e}800\u{1e}600")
+    }, chromeProcessProbe: { [.init(pid: 97438, headless: false)] })
+    for product in ["chrome", "vivaldi"] {
+        let result = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+            id: product, method: "macos_browser_automation",
+            params: .object(["protocolVersion": .number(1), "action": .string("metadata"), "product": .string(product)])
+        ))
+        #expect(result.ok)
+    }
+    #expect(calls == 2)
+
+    let vivaldiOnly = BrowserAutomationBroker(runner: { _, _, _ in
+        calls += 1
+        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}Example\u{1e}0\u{1e}0\u{1e}800\u{1e}600")
+    }, chromeProcessProbe: { throw NSError(domain: "simulated ps error", code: 1) })
+    let response = PluginRuntime(browserAutomation: vivaldiOnly).handle(RPCRequest(
+        id: "vivaldi", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("metadata"), "product": .string("vivaldi")])
+    ))
+    #expect(response.ok)
+    #expect(calls == 3)
+}
+
 @Test func browserAutomationBrokerOnlyAcceptsBoundedProducts() throws {
     var calls = 0
     let broker = BrowserAutomationBroker { _, _, _ in
