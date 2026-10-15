@@ -3,7 +3,7 @@ import Foundation
 import Testing
 @testable import DesktopOperatorCore
 
-@Test func browserAppleEventsChromeProcessRootParsingRejectsCompetingHeadlessRoot() {
+@Test func browserAppleEventsChromeProcessRootParsingKeepsIndependentHeadlessRootSeparate() {
     let gui = "97438 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
     let headless = "28434 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --headless=new --user-data-dir=/tmp/test-profile"
     let helper = "3939 /Applications/Google Chrome.app/Contents/Frameworks/Helpers/Google Chrome Helper.app/Contents/MacOS/Google Chrome Helper (Renderer) --type=renderer"
@@ -18,7 +18,7 @@ import Testing
 @Test func browserAppleEventsChromeAmbiguityFailsBeforeAnyScript() throws {
     let gui = BrowserAutomationBroker.ChromeProcessRoot(pid: 97438, headless: false)
     let headless = BrowserAutomationBroker.ChromeProcessRoot(pid: 28434, headless: true)
-    for sample in [[], [headless], [gui, headless], [gui, gui]] {
+    for sample in [[], [headless], [gui, gui], [gui, gui, headless]] {
         var appleEventsSent = 0
         let broker = BrowserAutomationBroker(runner: { _, _, _ in
             appleEventsSent += 1
@@ -44,7 +44,7 @@ import Testing
     let broker = BrowserAutomationBroker(runner: { _, _, _ in
         calls += 1
         return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://example.com\u{1e}Example\u{1e}0\u{1e}0\u{1e}800\u{1e}600")
-    }, chromeProcessProbe: { [.init(pid: 97438, headless: false)] })
+    }, chromeProcessProbe: { [.init(pid: 97438, headless: false), .init(pid: 28434, headless: true)] })
     for product in ["chrome", "vivaldi"] {
         let result = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
             id: product, method: "macos_browser_automation",
@@ -64,6 +64,19 @@ import Testing
     ))
     #expect(response.ok)
     #expect(calls == 3)
+}
+
+@Test func browserPidBoundChromeRejectsUnverifiedPIDWithoutLaunchingChrome() {
+    do {
+        _ = try ChromePidBoundAutomation.execute(
+            pid: 0, action: "metadata", windowId: nil, tabId: nil, url: nil,
+            javascript: nil, timeoutMs: 1_000, frontmostPID: nil)
+        Issue.record("PID 0 must not be accepted as a live scriptable Chrome process")
+    } catch let error as PluginError {
+        #expect(error.code == "BROWSER_AUTOMATION_PROCESS_IDENTITY_LOST")
+    } catch {
+        Issue.record("Unexpected Chrome PID identity error: \(error)")
+    }
 }
 
 @Test func browserAutomationBrokerOnlyAcceptsBoundedProducts() throws {

@@ -87,12 +87,14 @@ final class BrowserAutomationBroker {
     private let frontmostBundleIdentifier: () -> String?
     private let trustedInputPerformer: TrustedInputPerformer
     private let chromeProcessProbe: ChromeProcessProbe
+    private let useProcessBoundChrome: Bool
 
     init() {
         self.runner = Self.runCommand
         self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
         self.trustedInputPerformer = Self.performTrustedInput
         self.chromeProcessProbe = Self.liveChromeProcessRoots
+        self.useProcessBoundChrome = true
     }
 
     init(
@@ -104,6 +106,9 @@ final class BrowserAutomationBroker {
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         self.trustedInputPerformer = Self.performTrustedInput
         self.chromeProcessProbe = chromeProcessProbe
+        // A supplied runner is a test-only mock; production never sends
+        // name-addressed Chrome AppleScript after PID selection.
+        self.useProcessBoundChrome = false
     }
 
     init(
@@ -116,6 +121,7 @@ final class BrowserAutomationBroker {
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         self.trustedInputPerformer = trustedInputPerformer
         self.chromeProcessProbe = chromeProcessProbe
+        self.useProcessBoundChrome = false
     }
 
     func execute(params: JSONValue) throws -> JSONValue {
@@ -134,7 +140,24 @@ final class BrowserAutomationBroker {
         // AppleScript application-name addressing cannot prove a specific PID.
         // Even a headless CDP Chrome root may answer instead of the user's GUI.
         if product == "chrome" && Self.supportedActions.contains(action) {
-            try requireUniqueChromeRoot()
+            let pid = try requireExactGuiChromeRoot()
+            if useProcessBoundChrome {
+                if action == "trusted_input" {
+                    guard let target else { throw invalid("BROWSER_AUTOMATION_TAB_REF_REQUIRED") }
+                    return try trustedInput(object["input"], browser: browser, target: target,
+                                            timeoutMs: timeoutMs, chromePID: pid)
+                }
+                let scriptURL = ["create_tab", "navigate"].contains(action)
+                    ? try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes) : nil
+                let source = action == "execute_javascript"
+                    ? try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes) : nil
+                let raw = try ChromePidBoundAutomation.execute(
+                    pid: pid, action: action, windowId: target?.windowId, tabId: target?.tabId,
+                    url: scriptURL, javascript: source, timeoutMs: timeoutMs,
+                    frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+                if action == "create_tab" { return try createTabResult(raw, requestedURL: scriptURL!) }
+                return valueResult(raw)
+            }
         }
 
         switch action {
@@ -171,11 +194,20 @@ final class BrowserAutomationBroker {
         }
     }
 
-    private func trustedInput(_ value: JSONValue?, browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws -> JSONValue {
-        let metadata = authoritativeMetadata(
-            try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
-            browser: browser
-        ).components(separatedBy: String(UnicodeScalar(30)!))
+    private func trustedInput(_ value: JSONValue?, browser: BrowserDefinition, target: TabRef,
+                              timeoutMs: Int, chromePID: pid_t? = nil) throws -> JSONValue {
+        let rawMetadata: String
+        if let chromePID {
+            rawMetadata = try ChromePidBoundAutomation.execute(
+                pid: chromePID, action: "metadata", windowId: target.windowId, tabId: target.tabId,
+                url: nil, javascript: nil, timeoutMs: timeoutMs,
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        } else {
+            rawMetadata = authoritativeMetadata(
+                try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
+                browser: browser)
+        }
+        let metadata = rawMetadata.components(separatedBy: String(UnicodeScalar(30)!))
         guard metadata.count >= 10,
               metadata[0].lowercased() == "true",
               metadata[9].lowercased() == "true" else {
@@ -191,7 +223,7 @@ final class BrowserAutomationBroker {
         }
 
         let pointerKinds: Set<String> = ["click", "move", "wheel", "drag"]
-        let geometry = pointerKinds.contains(kind) ? try viewportGeometry(browser: browser, target: target, timeoutMs: timeoutMs) : nil
+        let geometry = pointerKinds.contains(kind) ? try viewportGeometry(browser: browser, target: target, timeoutMs: timeoutMs, chromePID: chromePID) : nil
         let button = input["button"]?.stringValue ?? "left"
         guard ["left", "middle", "right"].contains(button) else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
 
@@ -248,9 +280,18 @@ final class BrowserAutomationBroker {
         return .object(["performed": .bool(true)])
     }
 
-    private func viewportGeometry(browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws -> ViewportGeometry {
+    private func viewportGeometry(browser: BrowserDefinition, target: TabRef,
+                                  timeoutMs: Int, chromePID: pid_t? = nil) throws -> ViewportGeometry {
         let source = "JSON.stringify({screenX:window.screenX,screenY:window.screenY,outerWidth:window.outerWidth,outerHeight:window.outerHeight,innerWidth:window.innerWidth,innerHeight:window.innerHeight})"
-        let raw = try runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs)
+        let raw: String
+        if let chromePID {
+            raw = try ChromePidBoundAutomation.execute(
+                pid: chromePID, action: "execute_javascript", windowId: target.windowId, tabId: target.tabId,
+                url: nil, javascript: source, timeoutMs: timeoutMs,
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        } else {
+            raw = try runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs)
+        }
         guard let data = raw.data(using: .utf8),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: NSNumber],
               let screenX = object["screenX"]?.doubleValue,
@@ -355,7 +396,7 @@ final class BrowserAutomationBroker {
         return chromeProcessRoots(psOutput: result.stdout)
     }
 
-    private func requireUniqueChromeRoot() throws {
+    private func requireExactGuiChromeRoot() throws -> pid_t {
         let roots: [ChromeProcessRoot]
         do { roots = try chromeProcessProbe() }
         catch {
@@ -363,15 +404,17 @@ final class BrowserAutomationBroker {
                               message: "Cannot establish Chrome process identity; refusing Apple Events.",
                               retryable: true, domain: "browser")
         }
-        guard roots.count == 1, roots.first?.headless == false else {
+        let guiRoots = roots.filter { !$0.headless }
+        guard guiRoots.count == 1, let gui = guiRoots.first else {
             throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_TARGET_AMBIGUOUS",
-                              message: "AppleScript cannot identify the signed-in GUI Chrome when multiple or only headless app roots exist; no Apple Event was sent.",
+                              message: "No unique GUI Chrome process root exists; refusing to select a PID.",
                               retryable: false, domain: "browser",
                               details: .object([
                                   "chromeRootCount": .number(Double(roots.count)),
                                   "headlessRootCount": .number(Double(roots.filter { $0.headless }.count)),
                               ]))
         }
+        return gui.pid
     }
 
     private func runAppleScript(_ script: String, args: [String], timeoutMs: Int) throws -> String {
