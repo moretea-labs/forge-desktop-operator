@@ -79,6 +79,22 @@ import Testing
     }
 }
 
+@Test func browserPidBoundAppleEventFailuresNeverBlindlyReplayMutations() {
+    let denial = NSError(domain: NSOSStatusErrorDomain, code: -1743,
+                         userInfo: [NSLocalizedDescriptionKey: "Apple Events access denied"])
+    for action in ["create_tab", "navigate", "close_tab", "reload",
+                   "execute_javascript", "activate", "trusted_input"] {
+        let result = ChromePidBoundAutomation.eventFailure(denial, action: action)
+        #expect(result.code == "BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN")
+        #expect(!result.retryable)
+    }
+    for action in ["metadata", "list_tabs"] {
+        let result = ChromePidBoundAutomation.eventFailure(denial, action: action)
+        #expect(result.code == "BROWSER_AUTOMATION_NATIVE_EVENT_FAILED")
+        #expect(!result.retryable)
+    }
+}
+
 @Test func browserAutomationBrokerOnlyAcceptsBoundedProducts() throws {
     var calls = 0
     let broker = BrowserAutomationBroker { _, _, _ in

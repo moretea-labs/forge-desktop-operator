@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ScriptingBridge
+import ChromeScriptingGlue
 
 /// The sole production Chrome Apple Events transport. ScriptingBridge's
 /// processIdentifier binds every event to the verified GUI process rather
@@ -18,6 +19,22 @@ enum ChromePidBoundAutomation {
     private static let field = String(UnicodeScalar(31)!)
     private static let maxWindows = 128
     private static let maxTabs = 500
+
+    // Apple Event callbacks can arrive after an action was attempted. Even a
+    // failed call may have changed a tab; never mark its outcome safe to replay.
+    static func eventFailure(_ error: Error, action: String) -> PluginError {
+        let code = (action == "metadata" || action == "list_tabs")
+            ? "BROWSER_AUTOMATION_NATIVE_EVENT_FAILED"
+            : "BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN"
+        return PluginError(
+            code: code,
+            message: "Process-bound Chrome Apple Event failed: " +
+                String(error.localizedDescription.prefix(1_000)),
+            retryable: false,
+            domain: "browser"
+        )
+    }
+
 
     private static func code(_ four: String) -> UInt32 {
         precondition(four.utf8.count == 4)
@@ -67,11 +84,11 @@ enum ChromePidBoundAutomation {
     private static func error(_ code: String, _ message: String) -> PluginError {
         PluginError(code: code, message: message, retryable: false, domain: "browser")
     }
-    private static func checkedApp(pid: pid_t, timeoutMs: Int) throws -> SBApplication {
+    private static func checkedApp(pid: pid_t, timeoutMs: Int) throws -> ForgeChromeApplication {
         guard let running = NSRunningApplication(processIdentifier: pid),
               running.bundleIdentifier == "com.google.Chrome",
               running.executableURL?.path.hasSuffix("/Google Chrome.app/Contents/MacOS/Google Chrome") == true,
-              let app = SBApplication(processIdentifier: pid), app.isRunning else {
+              let app = ForgeChromeApplication(processIdentifier: pid), app.isRunning else {
             throw error("BROWSER_AUTOMATION_PROCESS_IDENTITY_LOST",
                         "Verified GUI Chrome PID is no longer the same scriptable application")
         }
@@ -89,7 +106,9 @@ enum ChromePidBoundAutomation {
         let failures = FailureRecorder()
         app.delegate = failures
         defer { app.delegate = nil }
-        let result = try { () throws -> String in
+        let result: String
+        do {
+          result = try { () throws -> String in
         let allWindows = windows(app)
         func selected() throws -> (SBObject, SBObject) {
             if let tabId, !tabId.isEmpty {
@@ -143,11 +162,7 @@ enum ChromePidBoundAutomation {
             }
             let previousActiveID = propertyText(try activeTab(window), "ID  ")
             let previous = Set(tabs(window).map { propertyText($0, "ID  ") })
-            let elementClass = app.class(forScriptingClass: "tab") as? SBObject.Type
-            guard let elementClass else {
-                throw error("BROWSER_AUTOMATION_SCRIPTING_CLASS_MISSING", "Chrome tab scripting class unavailable")
-            }
-            window.elementArray(withCode: code("CrTb")).add(elementClass.init())
+            window.elementArray(withCode: code("CrTb")).add(ForgeChromeTab(elementCode: code("CrTb"), properties: nil, data: nil))
             let created = tabs(window).filter { !previous.contains(propertyText($0, "ID  ")) }
             guard created.count == 1, let tab = created.first else {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not return one newly created tab")
@@ -164,7 +179,7 @@ enum ChromePidBoundAutomation {
             return [propertyText(window, "ID  "), propertyText(tab, "ID  "), url, afterUrl].joined(separator: record)
         case "close_tab":
             let (_, tab) = try selected()
-            _ = tab.perform(NSSelectorFromString("close"))
+            ForgeChromeCloseTab(tab)
             return ""
         case "navigate":
             guard let url else { throw error("BROWSER_AUTOMATION_URL_INVALID", "Missing Chrome URL") }
@@ -173,13 +188,12 @@ enum ChromePidBoundAutomation {
             return url
         case "reload":
             let (_, tab) = try selected()
-            _ = tab.perform(NSSelectorFromString("reload"))
+            ForgeChromeReloadTab(tab)
             return ""
         case "execute_javascript":
             guard let javascript else { throw error("BROWSER_AUTOMATION_JAVASCRIPT_INVALID", "Missing Chrome JavaScript") }
             let (_, tab) = try selected()
-            let result = tab.perform(NSSelectorFromString("executeJavascript:"), with: javascript)?.takeUnretainedValue()
-            return text(result)
+            return text(ForgeChromeExecuteJavascript(tab, javascript))
         case "activate":
             let (window, tab) = try selected()
             guard let index = tabs(window).firstIndex(where: { propertyText($0, "ID  ") == propertyText(tab, "ID  ") }) else {
@@ -192,11 +206,15 @@ enum ChromePidBoundAutomation {
         default:
             throw error("BROWSER_AUTOMATION_ACTION_UNSUPPORTED", "Unsupported process-bound Chrome action")
         }
-        }()
-        if let lastError = failures.lastError {
-            throw PluginError(code: "BROWSER_AUTOMATION_ACTION_FAILED",
-                              message: String(lastError.localizedDescription.prefix(2_000)),
-                              retryable: true, domain: "browser")
+          }()
+        } catch {
+            if let failure = failures.lastError {
+                throw eventFailure(failure, action: action)
+            }
+            throw error
+        }
+        if let failure = failures.lastError {
+            throw eventFailure(failure, action: action)
         }
         return result
     }

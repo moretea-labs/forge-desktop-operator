@@ -155,7 +155,7 @@ final class BrowserAutomationBroker {
                     pid: pid, action: action, windowId: target?.windowId, tabId: target?.tabId,
                     url: scriptURL, javascript: source, timeoutMs: timeoutMs,
                     frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
-                if action == "create_tab" { return try createTabResult(raw, requestedURL: scriptURL!) }
+                if action == "create_tab" { return try createTabResult(raw, requestedURL: scriptURL!, acceptedBy: "chrome_process_bound_url_set") }
                 return valueResult(raw)
             }
         }
@@ -336,7 +336,7 @@ final class BrowserAutomationBroker {
         .object(["value": .string(value)])
     }
 
-    private func createTabResult(_ value: String, requestedURL: String) throws -> JSONValue {
+    private func createTabResult(_ value: String, requestedURL: String, acceptedBy: String = "chrome_applescript_url_set") throws -> JSONValue {
         let separator = String(UnicodeScalar(30)!)
         let parts = value.components(separatedBy: separator)
         guard parts.count == 4, !parts[0].isEmpty, !parts[1].isEmpty, parts[2] == requestedURL else {
@@ -350,7 +350,7 @@ final class BrowserAutomationBroker {
                 "provenanceVersion": .number(1),
                 "requestedUrl": .string(requestedURL),
                 "assignmentAccepted": .bool(true),
-                "acceptedBy": .string("chrome_applescript_url_set"),
+                "acceptedBy": .string(acceptedBy),
                 "observedUrlAfterAssignment": .string(parts[3]),
             ]),
         ])
