@@ -101,7 +101,11 @@ public final class AccessibilityDriver {
             legacy.root,
             record: record,
             snapshotRevision: legacy.snapshotRevision,
-            inheritedWindowRef: nil
+            inheritedWindowRef: nil,
+            writableAttributes: { node in
+                guard let element = session.elements[node.ref] else { return [] }
+                return Self.writableObservedAttributes(element: element, node: node)
+            }
         )
         Self.recordElementWindowBindings(root, into: session)
         return ComputerElementSnapshot(
@@ -122,14 +126,16 @@ public final class AccessibilityDriver {
         _ node: AXNode,
         record: DesktopSessionRecord,
         snapshotRevision: Int,
-        inheritedWindowRef: String?
+        inheritedWindowRef: String?,
+        writableAttributes: (AXNode) -> Set<String> = { _ in [] }
     ) -> ComputerElement {
         let windowRef = node.role == (kAXWindowRole as String) ? node.ref : inheritedWindowRef
         let actions = normalizedSemanticActions(
             rawActions: node.actions,
             role: node.role,
             expanded: node.expanded,
-            selected: node.selected
+            enabled: node.enabled,
+            writableAttributes: writableAttributes(node)
         )
         let target = ComputerElementTarget(
             interactionId: record.interactionId,
@@ -161,7 +167,8 @@ public final class AccessibilityDriver {
                     child,
                     record: record,
                     snapshotRevision: snapshotRevision,
-                    inheritedWindowRef: windowRef
+                    inheritedWindowRef: windowRef,
+                    writableAttributes: writableAttributes
                 )
             }
         )
@@ -176,34 +183,75 @@ public final class AccessibilityDriver {
         }
     }
 
+    /// Advertise only actions for which the current element exposes an executable AX route.
+    /// The role identifies intent, but never grants a setter or an AX action by itself.
     static func normalizedSemanticActions(
         rawActions: [String],
         role: String?,
         expanded: Bool?,
-        selected: Bool?
+        enabled: Bool? = nil,
+        writableAttributes: Set<String> = []
     ) -> [String] {
+        guard enabled != false else { return [] }
         var actions = Set<String>()
         let raw = Set(rawActions)
-        if raw.contains(kAXPressAction as String) { actions.insert("invoke") }
+        let canPress = raw.contains(kAXPressAction as String)
+        let canWriteValue = writableAttributes.contains(kAXValueAttribute as String)
+        let isToggle = role == kAXCheckBoxRole as String || role == "AXSwitch"
+        if canPress { actions.insert("invoke") }
         if raw.contains(kAXShowMenuAction as String) { actions.insert("show_menu") }
-        if raw.contains(kAXPickAction as String) { actions.insert("select") }
         if raw.contains("AXOpen") || raw.contains("AXShowDefaultUI") { actions.insert("open") }
         if raw.contains("AXScrollDownByPage") { actions.insert("scroll_page_down") }
         if raw.contains("AXScrollUpByPage") { actions.insert("scroll_page_up") }
-        if expanded != nil {
-            actions.insert("expand")
-            actions.insert("collapse")
-            actions.insert("open")
+        if expanded != nil && writableAttributes.contains(kAXDisclosingAttribute as String) {
+            actions.formUnion(["expand", "collapse", "open"])
         }
-        if selected != nil { actions.insert("select") }
-        if role == kAXTextFieldRole as String || role == kAXTextAreaRole as String || role == "AXComboBox" {
-            actions.insert("set_value")
+        if writableAttributes.contains(kAXSelectedAttribute as String)
+            || raw.contains(kAXPickAction as String)
+            || (role == kAXRadioButtonRole as String && canPress) {
+            actions.insert("select")
         }
-        if role == kAXCheckBoxRole as String || role == kAXRadioButtonRole as String || role == "AXSwitch" {
-            actions.insert("toggle")
-        }
-        if role != nil { actions.insert("focus") }
+        if canWriteValue && role != "AXSecureTextField" { actions.insert("set_value") }
+        if isToggle && (canPress || writableAttributes.contains("AXBinaryToggleValue")) { actions.insert("toggle") }
+        if writableAttributes.contains(kAXFocusedAttribute as String) { actions.insert("focus") }
         return actions.sorted()
+    }
+
+    private static func writableObservedAttributes(element: AXUIElement, node: AXNode) -> Set<String> {
+        guard node.enabled != false else { return [] }
+        var candidates: [CFString] = []
+        if node.focused != nil { candidates.append(kAXFocusedAttribute as CFString) }
+        if node.selected != nil { candidates.append(kAXSelectedAttribute as CFString) }
+        if node.expanded != nil { candidates.append(kAXDisclosingAttribute as CFString) }
+        if node.role != "AXSecureTextField" && (
+            node.value != nil ||
+            [kAXTextFieldRole as String, kAXTextAreaRole as String, "AXComboBox",
+             kAXCheckBoxRole as String, "AXSwitch", "AXSlider"].contains(node.role ?? "")
+        ) {
+            candidates.append(kAXValueAttribute as CFString)
+        }
+        var writable = Set<String>()
+        for attribute in candidates {
+            var settable = DarwinBoolean(false)
+            if AXUIElementIsAttributeSettable(element, attribute, &settable) == .success && settable.boolValue {
+                writable.insert(attribute as String)
+                if attribute as String == kAXValueAttribute as String,
+                   node.role == kAXCheckBoxRole as String || node.role == "AXSwitch",
+                   hasBinaryToggleValue(element) {
+                    writable.insert("AXBinaryToggleValue")
+                }
+            }
+        }
+        return writable
+    }
+
+    private static func hasBinaryToggleValue(_ element: AXUIElement) -> Bool {
+        var current: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &current) == .success,
+              let current,
+              CFGetTypeID(current) == CFBooleanGetTypeID() || CFGetTypeID(current) == CFNumberGetTypeID(),
+              let number = current as? NSNumber else { return false }
+        return number.doubleValue == 0 || number.doubleValue == 1
     }
 
     public func press(
@@ -575,11 +623,23 @@ public final class AccessibilityDriver {
             target: target
         )
         prepare(element)
-        let supported = Set(Self.normalizedSemanticActions(
-            rawActions: actionNames(of: element),
+        let observedActions = actionNames(of: element)
+        let currentNode = AXNode(
+            ref: ref,
             role: stringAttribute(element, kAXRoleAttribute as CFString),
+            subrole: nil, title: nil, identifier: nil, description: nil, value: nil,
+            enabled: boolAttribute(element, kAXEnabledAttribute as CFString),
+            focused: boolAttribute(element, kAXFocusedAttribute as CFString),
+            selected: boolAttribute(element, kAXSelectedAttribute as CFString),
             expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
-            selected: boolAttribute(element, kAXSelectedAttribute as CFString)
+            frame: nil, actions: observedActions, children: []
+        )
+        let supported = Set(Self.normalizedSemanticActions(
+            rawActions: observedActions,
+            role: currentNode.role,
+            expanded: currentNode.expanded,
+            enabled: currentNode.enabled,
+            writableAttributes: Self.writableObservedAttributes(element: element, node: currentNode)
         ))
         guard supported.contains(action) else {
             throw PluginError(
@@ -592,6 +652,25 @@ public final class AccessibilityDriver {
 
         switch action {
         case "invoke", "toggle":
+            if action == "toggle" && !observedActions.contains(kAXPressAction as String) {
+                guard let nextValue = Self.nextToggleValue(jsonAttribute(element, kAXValueAttribute as CFString)) else {
+                    throw PluginError(
+                        code: "COMPUTER_ELEMENT_TOGGLE_VALUE_UNSUPPORTED",
+                        message: "Toggle requires AXPress or a readable binary AXValue.",
+                        retryable: false,
+                        domain: "accessibility"
+                    )
+                }
+                return try setObservedAttribute(
+                    element: element,
+                    attribute: kAXValueAttribute as CFString,
+                    value: try Self.nativeAttributeValue(nextValue),
+                    method: "AXValue_toggle",
+                    semanticAction: action,
+                    ref: ref,
+                    snapshotRevision: snapshotRevision
+                )
+            }
             return try performObservedAXAction(
                 element: element,
                 axAction: kAXPressAction as CFString,
@@ -669,10 +748,11 @@ public final class AccessibilityDriver {
                     snapshotRevision: snapshotRevision
                 )
             }
+            let usePick = observedActions.contains(kAXPickAction as String)
             return try performObservedAXAction(
                 element: element,
-                axAction: kAXPickAction as CFString,
-                method: "AXPick_background",
+                axAction: usePick ? kAXPickAction as CFString : kAXPressAction as CFString,
+                method: usePick ? "AXPick_background" : "AXPress_background",
                 semanticAction: action,
                 ref: ref,
                 snapshotRevision: snapshotRevision
@@ -688,34 +768,15 @@ public final class AccessibilityDriver {
                 payload["ref"] = .string(ref)
                 return .object(payload)
             }
-            var result = AXUIElementPerformAction(element, "AXOpen" as CFString)
-            if result == .cannotComplete {
-                Thread.sleep(forTimeInterval: 0.15)
-                result = AXUIElementPerformAction(element, "AXOpen" as CFString)
-            }
-            if result == .success {
-                return .object([
-                    "method": .string("AXOpen_background"),
-                    "semantic_action": .string(action),
-                    "ref": .string(ref),
-                    "snapshot_revision": .number(Double(snapshotRevision))
-                ])
-            }
-            if (result == .actionUnsupported || result == .attributeUnsupported), actionNames(of: element).contains("AXShowDefaultUI") {
-                return try performObservedAXAction(
-                    element: element,
-                    axAction: "AXShowDefaultUI" as CFString,
-                    method: "AXShowDefaultUI_background",
-                    semanticAction: action,
-                    ref: ref,
-                    snapshotRevision: snapshotRevision
-                )
-            }
-            throw PluginError(
-                code: "COMPUTER_ELEMENT_ACTION_FAILED",
-                message: "AXOpen failed with code \(result.rawValue)",
-                retryable: result == .cannotComplete,
-                domain: "accessibility"
+            // Pick the advertised native action before mutation; never probe with AXOpen.
+            let nativeAction = observedActions.contains("AXOpen") ? "AXOpen" : "AXShowDefaultUI"
+            return try performObservedAXAction(
+                element: element,
+                axAction: nativeAction as CFString,
+                method: "\(nativeAction)_background",
+                semanticAction: action,
+                ref: ref,
+                snapshotRevision: snapshotRevision
             )
         case "scroll_page_down":
             return try performObservedAXAction(
@@ -818,16 +879,13 @@ public final class AccessibilityDriver {
         ref: String,
         snapshotRevision: Int
     ) throws -> JSONValue {
-        var result = AXUIElementPerformAction(element, axAction)
-        if result == .cannotComplete {
-            Thread.sleep(forTimeInterval: 0.15)
-            result = AXUIElementPerformAction(element, axAction)
-        }
+        // AX cannot prove non-application after cannotComplete; do not replay a press.
+        let result = AXUIElementPerformAction(element, axAction)
         guard result == .success else {
             throw PluginError(
-                code: "COMPUTER_ELEMENT_ACTION_FAILED",
+                code: result == .cannotComplete ? "COMPUTER_ELEMENT_MUTATION_OUTCOME_UNKNOWN" : "COMPUTER_ELEMENT_ACTION_FAILED",
                 message: "\(axAction as String) failed with code \(result.rawValue)",
-                retryable: result == .cannotComplete,
+                retryable: false,
                 domain: "accessibility"
             )
         }
@@ -877,6 +935,16 @@ public final class AccessibilityDriver {
             "ref": .string(ref),
             "snapshot_revision": .number(Double(snapshotRevision))
         ])
+    }
+
+    static func nextToggleValue(_ current: JSONValue?) -> JSONValue? {
+        guard let current else { return nil }
+        switch current {
+        case .bool(let value): return .bool(!value)
+        case .number(let value) where value == 0 || value == 1:
+            return .number(value == 0 ? 1 : 0)
+        default: return nil
+        }
     }
 
     private static func nativeAttributeValue(_ value: JSONValue) throws -> CFTypeRef {

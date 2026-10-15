@@ -615,21 +615,37 @@ public final class PluginRuntime {
     private func executeComputerElementAction(_ arguments: JSONValue) throws -> JSONValue {
         let params = try decode(ComputerElementActionParams.self, from: arguments)
         let session = try sessions.get(params.target.interactionId)
-        let result = try session.withLock {
-            let result = try accessibility.performElementAction(
-                session: session,
-                ref: params.ref,
-                target: params.target,
-                action: params.action,
-                value: params.value
-            )
-            Self.retireObservedElementEpoch(session)
-            return result
+        return try session.withLock {
+            try Self.performObservedElementMutation(session: session) {
+                try accessibility.performElementAction(
+                    session: session,
+                    ref: params.ref,
+                    target: params.target,
+                    action: params.action,
+                    value: params.value
+                )
+            }
         }
-        return result
     }
 
-    /// A successful semantic mutation invalidates the exact observation that authorized it.
+    static func performObservedElementMutation(
+        session: DesktopSessionState,
+        perform: () throws -> JSONValue
+    ) throws -> JSONValue {
+        do {
+            let result = try perform()
+            retireObservedElementEpoch(session)
+            return result
+        } catch let error as PluginError {
+            // A mutation of unknown outcome cannot be sent again with the same ref.
+            if error.code == "COMPUTER_ELEMENT_MUTATION_OUTCOME_UNKNOWN" {
+                retireObservedElementEpoch(session)
+            }
+            throw error
+        }
+    }
+
+    /// An applied or outcome-unknown mutation invalidates its authorizing observation epoch.
     /// The next semantic action must come from a fresh observation epoch; no coordinate fallback is implied.
     static func retireObservedElementEpoch(_ session: DesktopSessionState) {
         session.elements.removeAll(keepingCapacity: false)

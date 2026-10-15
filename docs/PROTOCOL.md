@@ -30,7 +30,14 @@ Example request:
 
 `desktop_observe` and `computer.element.observe.v2` create an observation epoch. Element refs such as `ax_7_24` and AX window refs are valid only for the exact interaction/application/window context and `snapshotRevision` that produced them. A new observation replaces the ref registry.
 
-A successful `computer.element.action.v2` semantic mutation retires the authorizing observation epoch. Reusing its old ref fails with `COMPUTER_ELEMENT_OBSERVATION_STALE`; callers must re-observe. Bounds are metadata only and never authorize pointer input.
+A successful or outcome-unknown `computer.element.action.v2` semantic mutation retires the authorizing observation epoch. Reusing its old ref fails with `COMPUTER_ELEMENT_OBSERVATION_STALE`; callers must re-observe. Bounds are metadata only and never authorize pointer input.
+
+### Control-specific semantic routing
+
+`computer.element.observe.v2` is the operation selector for native controls. Its `actions` are calculated from the element's **actual AX action names and currently writable attributes**, not a role-only guess. Disabled elements expose no mutating actions. Text fields with non-settable `AXValue` do not claim `set_value`; focus requires writable `AXFocused`; disclosure requires writable `AXDisclosing`. Checkbox/switch `toggle` uses `AXPress` when present or a writable binary `AXValue` otherwise; radio-button `select` uses writable `AXSelected`, `AXPick`, or `AXPress` according to the observed capability. Menu and open actions use their advertised native action directly. Unsupported or stale actions produce typed errors before any mutation.
+
+Callers should observe the target, select an action **from that element's returned `actions`**, issue one exact `desktop_element_action`, and re-observe to verify the postcondition. There is no candidate-action guessing loop or coordinate fallback. For `AXUIElementPerformAction` returning `cannotComplete`, the provider returns `COMPUTER_ELEMENT_MUTATION_OUTCOME_UNKNOWN` without automatically replaying a potentially non-idempotent click: reconcile by observation before deciding whether a new interaction is needed.
+
 
 ## Unified Computer negotiation
 
