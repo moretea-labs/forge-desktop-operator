@@ -132,6 +132,16 @@ wait_pid_exit() {
 rollback_install() {
   local code=$?
   trap - EXIT
+  # Deliberately retain install lock if service state is not proven.
+  # Clearing it would permit concurrent duplicate provider installation.
+  require_recovery() {
+    local reason="$1"
+    printf 'release=%s\nreason=%s\nbackup=%s\nstage=%s\n' \
+      "$VERSION" "$reason" "$BACKUP_DIR" "$STAGE_DIR" \
+      >"$INSTALL_LOCK/RECOVERY_REQUIRED" || true
+    echo "RECOVERY_LOCK_RETAINED: $INSTALL_LOCK (reason=$reason)" >&2
+    exit "$code"
+  }
   if [[ "$code" -ne 0 && "$install_completed" -eq 0 ]]; then
     if [[ "$new_app_installed" -eq 1 ]]; then
       failed_pid=""
@@ -139,18 +149,18 @@ rollback_install() {
         launchctl print "$TARGET" >"$STAGE_DIR/failed-service.txt"
         if ! grep -Fq "$APP_EXECUTABLE" "$STAGE_DIR/failed-service.txt"; then
           echo "ROLLBACK_BLOCKED: another service owns the label; preserve backup" >&2
-          exit "$code"
+          require_recovery "service_owner_changed"
         fi
         failed_pid="$(sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\).*/\1/p' "$STAGE_DIR/failed-service.txt" | head -n 1)"
         launchctl bootout "$TARGET" || true
       fi
       if ! wait_service_gone; then
         echo "ROLLBACK_BLOCKED: new service still registered; preserve backup" >&2
-        exit "$code"
+        require_recovery "candidate_launchd_still_registered"
       fi
       if ! wait_pid_exit "$failed_pid"; then
         echo "ROLLBACK_BLOCKED: candidate PID still running after bounded shutdown; preserve backup" >&2
-        exit "$code"
+        require_recovery "candidate_process_not_exited"
       fi
       mv "$APP_BUNDLE" "$BACKUP_DIR/failed-candidate.app"
     fi
@@ -162,11 +172,11 @@ rollback_install() {
       if [[ "$had_agent" -eq 1 ]] && ! service_registered; then
         if [[ -n "$old_pid" ]] && kill -0 "$old_pid" 2>/dev/null; then
           echo "ROLLBACK_RECOVERY_REQUIRED: original PID is still running" >&2
-          exit "$code"
+          require_recovery "old_process_not_exited"
         fi
         if ! launchctl bootstrap "$DOMAIN" "$PLIST"; then
           echo "ROLLBACK_RECOVERY_REQUIRED: old service could not bootstrap" >&2
-          exit "$code"
+          require_recovery "old_launchd_bootstrap_failed"
         fi
       fi
       if [[ "$had_agent" -eq 1 ]]; then
@@ -180,7 +190,7 @@ rollback_install() {
         done
         if [[ "$old_ready" -ne 1 ]]; then
           echo "ROLLBACK_RECOVERY_REQUIRED: restored old service failed real health; retaining backup and install lock" >&2
-          exit "$code"
+          require_recovery "old_service_health_unproven"
         fi
       fi
     fi
