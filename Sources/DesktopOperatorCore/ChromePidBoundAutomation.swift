@@ -52,11 +52,18 @@ enum ChromePidBoundAutomation {
     private static func propertyText(_ object: SBObject, _ key: String) -> String {
         text(value(object, key))
     }
+    // SBElementArray is a lazy, live NSMutableArray proxy. Using Sequence.prefix
+    // invokes NSFastEnumeration and can raise NSRangeException when Chrome
+    // removes a window/tab between count and getObjects:range:. Evaluate the
+    // ScriptingBridge collection once, then enumerate the stable Swift array.
+    // The object references remain PID-bound; exact IDs must still be checked.
     private static func windows(_ app: SBApplication) -> [SBObject] {
-        Array(app.elementArray(withCode: code("cwin")).prefix(maxWindows)).compactMap { $0 as? SBObject }
+        let snapshot = app.elementArray(withCode: code("cwin")).get() ?? []
+        return snapshot.prefix(maxWindows).compactMap { $0 as? SBObject }
     }
     private static func tabs(_ window: SBObject) -> [SBObject] {
-        Array(window.elementArray(withCode: code("CrTb")).prefix(maxTabs)).compactMap { $0 as? SBObject }
+        let snapshot = window.elementArray(withCode: code("CrTb")).get() ?? []
+        return snapshot.prefix(maxTabs).compactMap { $0 as? SBObject }
     }
 
     private static func boundedField(_ field: String) -> String {
