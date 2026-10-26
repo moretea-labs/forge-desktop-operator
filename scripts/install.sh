@@ -92,10 +92,7 @@ if [[ -d "$APP_BUNDLE" ]]; then
   new_team="$(/usr/bin/codesign -dv --verbose=2 "$STAGED_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
   [[ "$old_team" == "$new_team" ]] || { echo "Refusing signed TCC identity change" >&2; exit 1; }
 fi
-if ! mkdir "$INSTALL_LOCK"; then
-  echo "Another installation or unresolved recovery owns the install lock" >&2
-  exit 1
-fi
+lock_acquired=0
 had_app=0
 had_agent=0
 had_plist=0
@@ -157,14 +154,33 @@ rollback_install() {
           exit "$code"
         fi
       fi
+      if [[ "$had_agent" -eq 1 ]]; then
+        old_ready=0
+        for ((check=0; check<100; check++)); do
+          if "$APP_EXECUTABLE" request --socket "$SOCKET" --method health --id rollback-readiness >/dev/null 2>&1; then
+            old_ready=1
+            break
+          fi
+          sleep 0.05
+        done
+        if [[ "$old_ready" -ne 1 ]]; then
+          echo "ROLLBACK_RECOVERY_REQUIRED: restored old service failed real health; retaining backup and install lock" >&2
+          exit "$code"
+        fi
+      fi
     fi
   fi
   rm -rf "$STAGE_DIR"
-  rmdir "$INSTALL_LOCK"
+  if [[ "$lock_acquired" -eq 1 ]]; then rmdir "$INSTALL_LOCK"; fi
   exit "$code"
 }
 
 trap rollback_install EXIT
+if ! mkdir "$INSTALL_LOCK"; then
+  echo "Another installation or unresolved recovery owns the install lock" >&2
+  exit 1
+fi
+lock_acquired=1
 mkdir -p "$BACKUP_DIR"
 if service_registered; then
   launchctl print "$TARGET" >"$STAGE_DIR/old-service.txt"
