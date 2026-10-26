@@ -85,7 +85,13 @@ if [[ -d "$APP_BUNDLE" ]]; then
   [[ "$old_bundle_id" == "$BUNDLE_ID" ]] || { echo "Unrecognized installed application" >&2; exit 1; }
   old_team="$(/usr/bin/codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
   new_team="$(/usr/bin/codesign -dv --verbose=2 "$STAGED_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
-  [[ "$old_team" == "$new_team" ]] || { echo "Signing/TCC principal changed; refusing replacement" >&2; exit 1; }
+  [[ -n "$old_team" && "$old_team" == "$new_team" ]] || { echo "Signing/TCC Team ID changed; refusing replacement" >&2; exit 1; }
+  old_authorities="$(/usr/bin/codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1 | sed -n 's/^Authority=//p')"
+  new_authorities="$(/usr/bin/codesign -dv --verbose=2 "$STAGED_APP" 2>&1 | sed -n 's/^Authority=//p')"
+  [[ -n "$old_authorities" && "$old_authorities" == "$new_authorities" ]] || {
+    echo "Signing authority chain changed; refusing potential TCC identity reset" >&2
+    exit 1
+  }
 fi
 if launchctl print "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1; then
   echo "Legacy service is still registered; its ownership must be reconciled separately" >&2
@@ -164,6 +170,11 @@ if launchctl print "$TARGET" >"$STAGE_DIR/launchd-before.txt" 2>&1; then
     exit 1
   }
   had_service=1
+  [[ -f "$PLIST" ]] || { echo "Loaded LaunchAgent lacks its owned plist; refusing unsafe rollback" >&2; exit 1; }
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$PLIST")" == "$LABEL" ]] || {
+    echo "LaunchAgent plist identity mismatch" >&2
+    exit 1
+  }
   old_service_pid="$(sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)[[:space:]]*$/\1/p' "$STAGE_DIR/launchd-before.txt" | head -n 1)"
   [[ "$had_app" == 1 ]] || { echo "Active service has no installed application" >&2; exit 1; }
 fi
