@@ -94,6 +94,7 @@ fi
 mkdir "$LOCK_DIR" || { echo "Install lock exists; refusing concurrent or unconfirmed install" >&2; exit 1; }
 
 had_service=0
+old_service_pid=""
 had_app=0
 had_plist=0
 had_registration=0
@@ -137,7 +138,11 @@ finish_install() {
     if [[ "$had_registration" == 1 ]]; then cp "$BACKUP_ROOT/registration.json" "$REG_DIR/registration.json"; else rm -f "$REG_DIR/registration.json"; fi
     if [[ "$had_manifest" == 1 ]]; then cp "$BACKUP_ROOT/forge-plugin.json" "$REG_DIR/forge-plugin.json"; else rm -f "$REG_DIR/forge-plugin.json"; fi
     if [[ "$had_service" == 1 ]] && ! launchctl print "$TARGET" >/dev/null 2>&1; then
-      launchctl bootstrap "$DOMAIN" "$PLIST" || echo "ROLLBACK_RECOVERY_REQUIRED: previous launchd bootstrap failed" >&2
+      if [[ -n "$old_service_pid" ]] && kill -0 "$old_service_pid" 2>/dev/null; then
+        echo "ROLLBACK_RECOVERY_REQUIRED: prior process remains alive; refusing duplicate bootstrap" >&2
+      else
+        launchctl bootstrap "$DOMAIN" "$PLIST" || echo "ROLLBACK_RECOVERY_REQUIRED: previous launchd bootstrap failed" >&2
+      fi
     fi
   fi
   rm -rf "$STAGE_DIR"
@@ -152,6 +157,7 @@ if launchctl print "$TARGET" >"$STAGE_DIR/launchd-before.txt" 2>&1; then
     exit 1
   }
   had_service=1
+  old_service_pid="$(sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)[[:space:]]*$/\1/p' "$STAGE_DIR/launchd-before.txt" | head -n 1)"
   [[ "$had_app" == 1 ]] || { echo "Active service has no installed application" >&2; exit 1; }
 fi
 mkdir -p "$BACKUP_ROOT"
@@ -169,6 +175,17 @@ if [[ "$had_service" == 1 ]]; then
     sleep 0.1
   done
   [[ "$stopped" == 1 ]] || { echo "Original launchd service remains registered; app untouched" >&2; exit 1; }
+  if [[ -n "$old_service_pid" ]]; then
+    old_pid_gone=0
+    for ((attempt=0;attempt<100;attempt++)); do
+      if ! kill -0 "$old_service_pid" 2>/dev/null; then old_pid_gone=1; break; fi
+      sleep 0.1
+    done
+    [[ "$old_pid_gone" == 1 ]] || {
+      echo "Original service PID remains alive; refusing to swap app or race its socket" >&2
+      exit 1
+    }
+  fi
 fi
 
 if [[ "$had_app" == 1 ]]; then mv "$APP_BUNDLE" "$BACKUP_APP"; old_moved=1; fi
