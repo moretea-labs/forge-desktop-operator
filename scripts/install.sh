@@ -10,11 +10,11 @@ LABEL="$BUNDLE_ID"
 APP_NAME="Forge Desktop Operator"
 APP_BUNDLE="$HOME/Applications/$APP_NAME.app"
 APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/desktop-operator"
-STAGE_DIR="$HOME/Library/Application Support/Forge/DesktopOperator/.staging-$VERSION-$BASHPID"
+STAGE_DIR="$HOME/Library/Application Support/Forge/DesktopOperator/.staging-$VERSION-$$"
 STAGED_APP="$STAGE_DIR/$APP_NAME.app"
 APP_CONTENTS="$STAGED_APP/Contents"
 STAGED_EXECUTABLE="$APP_CONTENTS/MacOS/desktop-operator"
-BACKUP_DIR="$HOME/Library/Application Support/Forge/DesktopOperator/backups/pre-$VERSION-$(date -u +%Y%m%dT%H%M%SZ)-$BASHPID"
+BACKUP_DIR="$HOME/Library/Application Support/Forge/DesktopOperator/backups/pre-$VERSION-$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BACKUP_APP="$BACKUP_DIR/$APP_NAME.app"
 INSTALL_LOCK="$HOME/Library/Application Support/Forge/DesktopOperator/.install-lock"
 APP_ROOT="$HOME/Library/Application Support/Forge/DesktopOperator"
@@ -34,6 +34,9 @@ if git -C "$ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   [[ -z "$(git -C "$ROOT" status --porcelain)" ]] || { echo "Refusing uncommitted Desktop Operator source in production installer" >&2; exit 1; }
 fi
 mkdir -p "$RELEASE_BIN_DIR" "$REG_DIR" "$RUN_DIR" "$LOG_DIR" "$HOME/Applications" "$(dirname "$PLIST")" "$STAGE_DIR"
+# Preflight failures must not leave abandoned signed candidates on disk.
+# The transaction's full rollback trap replaces this after identity checks.
+trap 'rm -rf "$STAGE_DIR"' EXIT
 cd "$ROOT"
 swift build -c release
 install -m 755 "$ROOT/.build/release/desktop-operator" "$RELEASE_BIN_DIR/desktop-operator"
@@ -114,6 +117,18 @@ wait_service_gone() {
   done
   return 1
 }
+# A launchd label disappearing does not prove its previous worker has exited.
+# Use one bounded observation of the attested PID and never signal an unknown PID.
+wait_pid_exit() {
+  local pid="$1"
+  local attempt
+  [[ -n "$pid" ]] || return 0
+  for ((attempt=0; attempt<100; attempt++)); do
+    if ! kill -0 "$pid" 2>/dev/null; then return 0; fi
+    sleep 0.1
+  done
+  return 1
+}
 rollback_install() {
   local code=$?
   trap - EXIT
@@ -133,8 +148,8 @@ rollback_install() {
         echo "ROLLBACK_BLOCKED: new service still registered; preserve backup" >&2
         exit "$code"
       fi
-      if [[ -n "$failed_pid" ]] && kill -0 "$failed_pid" 2>/dev/null; then
-        echo "ROLLBACK_BLOCKED: candidate PID still running; preserve backup" >&2
+      if ! wait_pid_exit "$failed_pid"; then
+        echo "ROLLBACK_BLOCKED: candidate PID still running after bounded shutdown; preserve backup" >&2
         exit "$code"
       fi
       mv "$APP_BUNDLE" "$BACKUP_DIR/failed-candidate.app"
@@ -198,14 +213,7 @@ if [[ "$had_agent" -eq 1 ]]; then
   old_bootout_attempted=1
   launchctl bootout "$TARGET" || true
   wait_service_gone || { echo "Old service still registered; installed app unchanged" >&2; exit 1; }
-  if [[ -n "$old_pid" ]]; then
-    old_exited=0
-    for ((attempt=0; attempt<100; attempt++)); do
-      if ! kill -0 "$old_pid" 2>/dev/null; then old_exited=1; break; fi
-      sleep 0.1
-    done
-    [[ "$old_exited" -eq 1 ]] || { echo "Old provider PID remains alive; installed app unchanged" >&2; exit 1; }
-  fi
+  wait_pid_exit "$old_pid" || { echo "Old provider PID remains alive; installed app unchanged" >&2; exit 1; }
 fi
 if [[ "$had_app" -eq 1 ]]; then
   mv "$APP_BUNDLE" "$BACKUP_APP"
