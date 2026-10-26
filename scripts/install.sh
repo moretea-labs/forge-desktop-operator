@@ -101,6 +101,7 @@ had_registration=0
 had_manifest=0
 old_moved=0
 new_installed=0
+metadata_changed=0
 complete=0
 [[ -d "$APP_BUNDLE" ]] && had_app=1
 
@@ -109,12 +110,12 @@ complete=0
 finish_install() {
   local result=$?
   trap - EXIT
+  local recovery_incomplete=0
   if [[ "$result" != 0 && "$complete" == 0 ]]; then
     if [[ "$new_installed" == 1 ]] && launchctl print "$TARGET" >"$STAGE_DIR/failed-service.txt" 2>&1; then
       if ! grep -Fq "$APP_EXECUTABLE" "$STAGE_DIR/failed-service.txt"; then
         echo "ROLLBACK_BLOCKED: launchd service identity changed; app preserved" >&2
-        rm -rf "$STAGE_DIR"
-        rmdir "$LOCK_DIR" || true
+        echo "Install lock and staging evidence retained for authorized Recovery" >&2
         exit "$result"
       fi
       launchctl bootout "$TARGET" || true
@@ -127,23 +128,29 @@ finish_install() {
       done
       if [[ "$removed" != 1 ]]; then
         echo "ROLLBACK_INCOMPLETE: candidate service still registered; app preserved" >&2
-        rm -rf "$STAGE_DIR"
-        rmdir "$LOCK_DIR" || true
+        echo "Install lock and staging evidence retained for authorized Recovery" >&2
         exit "$result"
       fi
       mv "$APP_BUNDLE" "$BACKUP_ROOT/failed-candidate.app"
     fi
     if [[ "$old_moved" == 1 ]]; then mv "$BACKUP_APP" "$APP_BUNDLE"; fi
-    if [[ "$had_plist" == 1 ]]; then cp "$BACKUP_ROOT/original.plist" "$PLIST"; else rm -f "$PLIST"; fi
-    if [[ "$had_registration" == 1 ]]; then cp "$BACKUP_ROOT/registration.json" "$REG_DIR/registration.json"; else rm -f "$REG_DIR/registration.json"; fi
-    if [[ "$had_manifest" == 1 ]]; then cp "$BACKUP_ROOT/forge-plugin.json" "$REG_DIR/forge-plugin.json"; else rm -f "$REG_DIR/forge-plugin.json"; fi
+    if [[ "$metadata_changed" == 1 ]]; then
+      if [[ "$had_plist" == 1 ]]; then cp "$BACKUP_ROOT/original.plist" "$PLIST"; else rm -f "$PLIST"; fi
+      if [[ "$had_registration" == 1 ]]; then cp "$BACKUP_ROOT/registration.json" "$REG_DIR/registration.json"; else rm -f "$REG_DIR/registration.json"; fi
+      if [[ "$had_manifest" == 1 ]]; then cp "$BACKUP_ROOT/forge-plugin.json" "$REG_DIR/forge-plugin.json"; else rm -f "$REG_DIR/forge-plugin.json"; fi
+    fi
     if [[ "$had_service" == 1 ]] && ! launchctl print "$TARGET" >/dev/null 2>&1; then
       if [[ -n "$old_service_pid" ]] && kill -0 "$old_service_pid" 2>/dev/null; then
         echo "ROLLBACK_RECOVERY_REQUIRED: prior process remains alive; refusing duplicate bootstrap" >&2
+        recovery_incomplete=1
       else
-        launchctl bootstrap "$DOMAIN" "$PLIST" || echo "ROLLBACK_RECOVERY_REQUIRED: previous launchd bootstrap failed" >&2
+        launchctl bootstrap "$DOMAIN" "$PLIST" || { echo "ROLLBACK_RECOVERY_REQUIRED: previous launchd bootstrap failed" >&2; recovery_incomplete=1; }
       fi
     fi
+  fi
+  if [[ "$recovery_incomplete" == 1 ]]; then
+    echo "Preserving installer lock, backup and diagnostics for authorized Recovery" >&2
+    exit "$result"
   fi
   rm -rf "$STAGE_DIR"
   rmdir "$LOCK_DIR" || true
@@ -191,6 +198,7 @@ fi
 if [[ "$had_app" == 1 ]]; then mv "$APP_BUNDLE" "$BACKUP_APP"; old_moved=1; fi
 mv "$STAGED_APP" "$APP_BUNDLE"
 new_installed=1
+metadata_changed=1
 install -m 644 "$ROOT/forge-plugin.json" "$REG_DIR/forge-plugin.json"
 cat >"$REG_DIR/registration.json" <<JSON
 {
