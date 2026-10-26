@@ -9,9 +9,17 @@ BUNDLE_ID="com.moretea.forge.desktop-operator"
 LABEL="$BUNDLE_ID"
 APP_NAME="Forge Desktop Operator"
 APP_BUNDLE="$HOME/Applications/$APP_NAME.app"
-APP_CONTENTS="$APP_BUNDLE/Contents"
-APP_EXECUTABLE="$APP_CONTENTS/MacOS/desktop-operator"
+APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/desktop-operator"
 APP_ROOT="$HOME/Library/Application Support/Forge/DesktopOperator"
+STAGE_DIR="$APP_ROOT/.install-stage-$VERSION-$$"
+STAGED_APP="$STAGE_DIR/$APP_NAME.app"
+APP_CONTENTS="$STAGED_APP/Contents"
+STAGED_EXECUTABLE="$APP_CONTENTS/MacOS/desktop-operator"
+BACKUP_ROOT="$APP_ROOT/backups/pre-$VERSION-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+BACKUP_APP="$BACKUP_ROOT/$APP_NAME.app"
+DOMAIN="gui/$(id -u)"
+TARGET="$DOMAIN/$LABEL"
+LOCK_DIR="$APP_ROOT/.install-lock"
 RELEASE_ROOT="$APP_ROOT/releases/$VERSION"
 RELEASE_BIN_DIR="$RELEASE_ROOT/bin"
 REG_DIR="$APP_ROOT/registration"
@@ -24,14 +32,13 @@ LEGACY_LABEL="com.moretea.repo-harness.desktop-operator"
 LEGACY_PLIST="$HOME/Library/LaunchAgents/$LEGACY_LABEL.plist"
 LEGACY_SOCKET="$HOME/Library/Caches/repo-harness/desktop-operator.sock"
 
-mkdir -p "$RELEASE_BIN_DIR" "$REG_DIR" "$RUN_DIR" "$LOG_DIR" "$HOME/Applications" "$(dirname "$PLIST")"
+mkdir -p "$RELEASE_BIN_DIR" "$REG_DIR" "$RUN_DIR" "$LOG_DIR" "$HOME/Applications" "$(dirname "$PLIST")" "$STAGE_DIR"
 cd "$ROOT"
 swift build -c release
 install -m 755 "$ROOT/.build/release/desktop-operator" "$RELEASE_BIN_DIR/desktop-operator"
 
-rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_CONTENTS/MacOS"
-install -m 755 "$RELEASE_BIN_DIR/desktop-operator" "$APP_EXECUTABLE"
+install -m 755 "$RELEASE_BIN_DIR/desktop-operator" "$STAGED_EXECUTABLE"
 cat >"$APP_CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -59,15 +66,150 @@ if [[ -z "$SIGNING_IDENTITY" ]]; then
   SIGNING_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null | /usr/bin/sed -n 's/.*"\(Apple Development:[^"]*\)".*/\1/p' | /usr/bin/head -n 1 || true)"
 fi
 if [[ -n "$SIGNING_IDENTITY" ]]; then
-  /usr/bin/codesign --force --deep --options runtime --timestamp=none --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
+  /usr/bin/codesign --force --deep --options runtime --timestamp=none --sign "$SIGNING_IDENTITY" "$STAGED_APP"
   SIGNING_MODE="identity:$SIGNING_IDENTITY"
 else
-  /usr/bin/codesign --force --deep --sign - "$APP_BUNDLE"
+  /usr/bin/codesign --force --deep --sign - "$STAGED_APP"
   SIGNING_MODE="ad-hoc"
   echo "WARNING: no persistent macOS code-signing identity was available; TCC consent may need to be granted again after binary updates." >&2
 fi
-/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+/usr/bin/codesign --verify --deep --strict "$STAGED_APP"
 
+
+# No production path has been touched yet: build, sign and verify the staged
+# candidate first. An active owner label must resolve to our exact executable.
+[[ ! -e "$APP_BUNDLE" || -d "$APP_BUNDLE" ]] || { echo "Installed path is not an app bundle" >&2; exit 1; }
+if [[ -d "$APP_BUNDLE" ]]; then
+  /usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+  old_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_BUNDLE/Contents/Info.plist")"
+  [[ "$old_bundle_id" == "$BUNDLE_ID" ]] || { echo "Unrecognized installed application" >&2; exit 1; }
+  old_team="$(/usr/bin/codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  new_team="$(/usr/bin/codesign -dv --verbose=2 "$STAGED_APP" 2>&1 | sed -n 's/^TeamIdentifier=//p')"
+  [[ -n "$old_team" && "$old_team" == "$new_team" ]] || { echo "Signing/TCC Team ID changed; refusing replacement" >&2; exit 1; }
+  old_authorities="$(/usr/bin/codesign -dv --verbose=2 "$APP_BUNDLE" 2>&1 | sed -n 's/^Authority=//p')"
+  new_authorities="$(/usr/bin/codesign -dv --verbose=2 "$STAGED_APP" 2>&1 | sed -n 's/^Authority=//p')"
+  [[ -n "$old_authorities" && "$old_authorities" == "$new_authorities" ]] || {
+    echo "Signing authority chain changed; refusing potential TCC identity reset" >&2
+    exit 1
+  }
+fi
+if launchctl print "$DOMAIN/$LEGACY_LABEL" >/dev/null 2>&1; then
+  echo "Legacy service is still registered; its ownership must be reconciled separately" >&2
+  exit 1
+fi
+mkdir "$LOCK_DIR" || { echo "Install lock exists; refusing concurrent or unconfirmed install" >&2; exit 1; }
+
+had_service=0
+old_service_pid=""
+had_app=0
+had_plist=0
+had_registration=0
+had_manifest=0
+old_moved=0
+new_installed=0
+metadata_changed=0
+complete=0
+[[ -d "$APP_BUNDLE" ]] && had_app=1
+
+# Failure after cutover restores the previous exact bundle and metadata.
+# Never move app bytes while an uncertain launchd service remains registered.
+finish_install() {
+  local result=$?
+  trap - EXIT
+  local recovery_incomplete=0
+  if [[ "$result" != 0 && "$complete" == 0 ]]; then
+    if [[ "$new_installed" == 1 ]] && launchctl print "$TARGET" >"$STAGE_DIR/failed-service.txt" 2>&1; then
+      if ! grep -Fq "$APP_EXECUTABLE" "$STAGE_DIR/failed-service.txt"; then
+        echo "ROLLBACK_BLOCKED: launchd service identity changed; app preserved" >&2
+        echo "Install lock and staging evidence retained for authorized Recovery" >&2
+        exit "$result"
+      fi
+      launchctl bootout "$TARGET" || true
+    fi
+    if [[ "$new_installed" == 1 ]]; then
+      local removed=0
+      for ((i=0; i<100; i++)); do
+        if ! launchctl print "$TARGET" >/dev/null 2>&1; then removed=1; break; fi
+        sleep 0.1
+      done
+      if [[ "$removed" != 1 ]]; then
+        echo "ROLLBACK_INCOMPLETE: candidate service still registered; app preserved" >&2
+        echo "Install lock and staging evidence retained for authorized Recovery" >&2
+        exit "$result"
+      fi
+      mv "$APP_BUNDLE" "$BACKUP_ROOT/failed-candidate.app"
+    fi
+    if [[ "$old_moved" == 1 ]]; then mv "$BACKUP_APP" "$APP_BUNDLE"; fi
+    if [[ "$metadata_changed" == 1 ]]; then
+      if [[ "$had_plist" == 1 ]]; then cp "$BACKUP_ROOT/original.plist" "$PLIST"; else rm -f "$PLIST"; fi
+      if [[ "$had_registration" == 1 ]]; then cp "$BACKUP_ROOT/registration.json" "$REG_DIR/registration.json"; else rm -f "$REG_DIR/registration.json"; fi
+      if [[ "$had_manifest" == 1 ]]; then cp "$BACKUP_ROOT/forge-plugin.json" "$REG_DIR/forge-plugin.json"; else rm -f "$REG_DIR/forge-plugin.json"; fi
+    fi
+    if [[ "$had_service" == 1 ]] && ! launchctl print "$TARGET" >/dev/null 2>&1; then
+      if [[ -n "$old_service_pid" ]] && kill -0 "$old_service_pid" 2>/dev/null; then
+        echo "ROLLBACK_RECOVERY_REQUIRED: prior process remains alive; refusing duplicate bootstrap" >&2
+        recovery_incomplete=1
+      else
+        launchctl bootstrap "$DOMAIN" "$PLIST" || { echo "ROLLBACK_RECOVERY_REQUIRED: previous launchd bootstrap failed" >&2; recovery_incomplete=1; }
+      fi
+    fi
+  fi
+  if [[ "$recovery_incomplete" == 1 ]]; then
+    echo "Preserving installer lock, backup and diagnostics for authorized Recovery" >&2
+    exit "$result"
+  fi
+  rm -rf "$STAGE_DIR"
+  rmdir "$LOCK_DIR" || true
+  exit "$result"
+}
+trap finish_install EXIT
+
+if launchctl print "$TARGET" >"$STAGE_DIR/launchd-before.txt" 2>&1; then
+  grep -Fq "$APP_EXECUTABLE" "$STAGE_DIR/launchd-before.txt" || {
+    echo "LaunchAgent executable identity mismatch; refusing bootout" >&2
+    exit 1
+  }
+  had_service=1
+  [[ -f "$PLIST" ]] || { echo "Loaded LaunchAgent lacks its owned plist; refusing unsafe rollback" >&2; exit 1; }
+  [[ "$(/usr/libexec/PlistBuddy -c 'Print :Label' "$PLIST")" == "$LABEL" ]] || {
+    echo "LaunchAgent plist identity mismatch" >&2
+    exit 1
+  }
+  old_service_pid="$(sed -n 's/^[[:space:]]*pid = \([0-9][0-9]*\)[[:space:]]*$/\1/p' "$STAGE_DIR/launchd-before.txt" | head -n 1)"
+  [[ "$had_app" == 1 ]] || { echo "Active service has no installed application" >&2; exit 1; }
+fi
+mkdir -p "$BACKUP_ROOT"
+if [[ -f "$PLIST" ]]; then cp -p "$PLIST" "$BACKUP_ROOT/original.plist"; had_plist=1; fi
+if [[ -f "$REG_DIR/registration.json" ]]; then cp -p "$REG_DIR/registration.json" "$BACKUP_ROOT/registration.json"; had_registration=1; fi
+if [[ -f "$REG_DIR/forge-plugin.json" ]]; then cp -p "$REG_DIR/forge-plugin.json" "$BACKUP_ROOT/forge-plugin.json"; had_manifest=1; fi
+
+# One bootout; reconcile the actual exact label rather than retrying an effect
+# whose outcome is unknown. On failure, the old bundle remains intact.
+if [[ "$had_service" == 1 ]]; then
+  launchctl bootout "$TARGET" || true
+  stopped=0
+  for ((attempt=0; attempt<100; attempt++)); do
+    if ! launchctl print "$TARGET" >/dev/null 2>&1; then stopped=1; break; fi
+    sleep 0.1
+  done
+  [[ "$stopped" == 1 ]] || { echo "Original launchd service remains registered; app untouched" >&2; exit 1; }
+  if [[ -n "$old_service_pid" ]]; then
+    old_pid_gone=0
+    for ((attempt=0;attempt<100;attempt++)); do
+      if ! kill -0 "$old_service_pid" 2>/dev/null; then old_pid_gone=1; break; fi
+      sleep 0.1
+    done
+    [[ "$old_pid_gone" == 1 ]] || {
+      echo "Original service PID remains alive; refusing to swap app or race its socket" >&2
+      exit 1
+    }
+  fi
+fi
+
+if [[ "$had_app" == 1 ]]; then mv "$APP_BUNDLE" "$BACKUP_APP"; old_moved=1; fi
+mv "$STAGED_APP" "$APP_BUNDLE"
+new_installed=1
+metadata_changed=1
 install -m 644 "$ROOT/forge-plugin.json" "$REG_DIR/forge-plugin.json"
 cat >"$REG_DIR/registration.json" <<JSON
 {
@@ -115,32 +257,19 @@ cat >"$PLIST" <<PLIST
 </plist>
 PLIST
 
-DOMAIN="gui/$(id -u)"
-launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
-launchctl bootout "$DOMAIN/$LEGACY_LABEL" 2>/dev/null || true
-rm -f "$LEGACY_PLIST" "$LEGACY_SOCKET" "$LEGACY_SOCKET.lock"
 launchctl bootstrap "$DOMAIN" "$PLIST"
-launchctl enable "$DOMAIN/$LABEL"
-
+launchctl enable "$TARGET"
 READY=0
 for ((attempt=0; attempt<100; attempt++)); do
-  if "$APP_EXECUTABLE" request --socket "$SOCKET" --method health --id install-readiness >/dev/null 2>&1; then
-    READY=1
-    break
-  fi
+  if "$APP_EXECUTABLE" request --socket "$SOCKET" --method health --id install-readiness >/dev/null 2>&1; then READY=1; break; fi
   sleep 0.05
 done
-if [[ "$READY" != "1" ]]; then
-  echo "desktop_operator did not become ready on $SOCKET after launchctl bootstrap" >&2
-  launchctl print "$DOMAIN/$LABEL" >&2 || true
-  tail -40 "$LOG_DIR/stderr.log" >&2 || true
-  exit 1
-fi
-
-echo "Installed desktop_operator"
+[[ "$READY" == 1 ]] || { echo "New service failed readiness; restoring old version" >&2; exit 1; }
+[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP_BUNDLE/Contents/Info.plist")" == "$VERSION" ]]
+/usr/bin/codesign --verify --deep --strict "$APP_BUNDLE"
+complete=1
+echo "Installed desktop_operator $VERSION"
 echo "App: $APP_BUNDLE"
-echo "Bundle ID: $BUNDLE_ID"
 echo "Signing: $SIGNING_MODE"
-echo "Registration: $REG_DIR/registration.json"
+echo "Backup: $BACKUP_ROOT"
 echo "Socket: $SOCKET"
-echo "Grant Accessibility and Screen Recording once to: $APP_BUNDLE"
