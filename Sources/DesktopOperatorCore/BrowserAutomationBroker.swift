@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Darwin
 import Foundation
 
 struct BrowserAutomationCommandResult: Equatable {
@@ -33,6 +34,12 @@ struct BrowserAutomationTrustedInputCommand: Equatable {
 
 final class BrowserAutomationBroker {
     typealias CommandRunner = (_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult
+    typealias ChromeProcessProbe = () throws -> [ChromeProcessRoot]
+
+    struct ChromeProcessRoot: Equatable {
+        let pid: Int32
+        let headless: Bool
+    }
     typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
 
     private struct BrowserDefinition {
@@ -66,6 +73,8 @@ final class BrowserAutomationBroker {
     ]
     private static let defaultTimeoutMs = 5_000
     private static let maxTimeoutMs = 30_000
+    private static let terminateGraceMs = 250
+    private static let forcedKillGraceMs = 750
     private static let maxURLBytes = 65_536
     private static let maxJavaScriptBytes = 768 * 1_024
     private static let maxCaptureBytes = 3 * 1_048_576
@@ -77,30 +86,42 @@ final class BrowserAutomationBroker {
     private let runner: CommandRunner
     private let frontmostBundleIdentifier: () -> String?
     private let trustedInputPerformer: TrustedInputPerformer
+    private let chromeProcessProbe: ChromeProcessProbe
+    private let useProcessBoundChrome: Bool
 
     init() {
         self.runner = Self.runCommand
         self.frontmostBundleIdentifier = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
         self.trustedInputPerformer = Self.performTrustedInput
+        self.chromeProcessProbe = Self.liveChromeProcessRoots
+        self.useProcessBoundChrome = true
     }
 
     init(
         runner: @escaping CommandRunner,
-        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier }
+        frontmostBundleIdentifier: @escaping () -> String? = { NSWorkspace.shared.frontmostApplication?.bundleIdentifier },
+        chromeProcessProbe: @escaping ChromeProcessProbe = { [ChromeProcessRoot(pid: 1, headless: false)] }
     ) {
         self.runner = runner
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         self.trustedInputPerformer = Self.performTrustedInput
+        self.chromeProcessProbe = chromeProcessProbe
+        // A supplied runner is a test-only mock; production never sends
+        // name-addressed Chrome AppleScript after PID selection.
+        self.useProcessBoundChrome = false
     }
 
     init(
         runner: @escaping CommandRunner,
         frontmostBundleIdentifier: @escaping () -> String?,
-        trustedInputPerformer: @escaping TrustedInputPerformer
+        trustedInputPerformer: @escaping TrustedInputPerformer,
+        chromeProcessProbe: @escaping ChromeProcessProbe = { [ChromeProcessRoot(pid: 1, headless: false)] }
     ) {
         self.runner = runner
         self.frontmostBundleIdentifier = frontmostBundleIdentifier
         self.trustedInputPerformer = trustedInputPerformer
+        self.chromeProcessProbe = chromeProcessProbe
+        self.useProcessBoundChrome = false
     }
 
     func execute(params: JSONValue) throws -> JSONValue {
@@ -116,6 +137,28 @@ final class BrowserAutomationBroker {
             throw invalid("BROWSER_AUTOMATION_PRODUCT_INVALID")
         }
         let target = try optionalRef(object["ref"])
+        // AppleScript application-name addressing cannot prove a specific PID.
+        // Even a headless CDP Chrome root may answer instead of the user's GUI.
+        if product == "chrome" && Self.supportedActions.contains(action) {
+            let pid = try requireExactGuiChromeRoot()
+            if useProcessBoundChrome {
+                if action == "trusted_input" {
+                    guard let target else { throw invalid("BROWSER_AUTOMATION_TAB_REF_REQUIRED") }
+                    return try trustedInput(object["input"], browser: browser, target: target,
+                                            timeoutMs: timeoutMs, chromePID: pid)
+                }
+                let scriptURL = ["create_tab", "navigate"].contains(action)
+                    ? try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes) : nil
+                let source = action == "execute_javascript"
+                    ? try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes) : nil
+                let raw = try ChromePidBoundAutomation.execute(
+                    pid: pid, action: action, windowId: target?.windowId, tabId: target?.tabId,
+                    url: scriptURL, javascript: source, timeoutMs: timeoutMs,
+                    frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+                if action == "create_tab" { return try createTabResult(raw, requestedURL: scriptURL!, acceptedBy: "chrome_process_bound_url_set") }
+                return valueResult(raw)
+            }
+        }
 
         switch action {
         case "metadata":
@@ -151,11 +194,20 @@ final class BrowserAutomationBroker {
         }
     }
 
-    private func trustedInput(_ value: JSONValue?, browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws -> JSONValue {
-        let metadata = authoritativeMetadata(
-            try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
-            browser: browser
-        ).components(separatedBy: String(UnicodeScalar(30)!))
+    private func trustedInput(_ value: JSONValue?, browser: BrowserDefinition, target: TabRef,
+                              timeoutMs: Int, chromePID: pid_t? = nil) throws -> JSONValue {
+        let rawMetadata: String
+        if let chromePID {
+            rawMetadata = try ChromePidBoundAutomation.execute(
+                pid: chromePID, action: "metadata", windowId: target.windowId, tabId: target.tabId,
+                url: nil, javascript: nil, timeoutMs: timeoutMs,
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        } else {
+            rawMetadata = authoritativeMetadata(
+                try runAppleScript(metadataScript(browser.appName, target), args: [], timeoutMs: timeoutMs),
+                browser: browser)
+        }
+        let metadata = rawMetadata.components(separatedBy: String(UnicodeScalar(30)!))
         guard metadata.count >= 10,
               metadata[0].lowercased() == "true",
               metadata[9].lowercased() == "true" else {
@@ -171,7 +223,7 @@ final class BrowserAutomationBroker {
         }
 
         let pointerKinds: Set<String> = ["click", "move", "wheel", "drag"]
-        let geometry = pointerKinds.contains(kind) ? try viewportGeometry(browser: browser, target: target, timeoutMs: timeoutMs) : nil
+        let geometry = pointerKinds.contains(kind) ? try viewportGeometry(browser: browser, target: target, timeoutMs: timeoutMs, chromePID: chromePID) : nil
         let button = input["button"]?.stringValue ?? "left"
         guard ["left", "middle", "right"].contains(button) else { throw invalid("BROWSER_AUTOMATION_TRUSTED_INPUT_INVALID") }
 
@@ -228,9 +280,18 @@ final class BrowserAutomationBroker {
         return .object(["performed": .bool(true)])
     }
 
-    private func viewportGeometry(browser: BrowserDefinition, target: TabRef, timeoutMs: Int) throws -> ViewportGeometry {
+    private func viewportGeometry(browser: BrowserDefinition, target: TabRef,
+                                  timeoutMs: Int, chromePID: pid_t? = nil) throws -> ViewportGeometry {
         let source = "JSON.stringify({screenX:window.screenX,screenY:window.screenY,outerWidth:window.outerWidth,outerHeight:window.outerHeight,innerWidth:window.innerWidth,innerHeight:window.innerHeight})"
-        let raw = try runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs)
+        let raw: String
+        if let chromePID {
+            raw = try ChromePidBoundAutomation.execute(
+                pid: chromePID, action: "execute_javascript", windowId: target.windowId, tabId: target.tabId,
+                url: nil, javascript: source, timeoutMs: timeoutMs,
+                frontmostPID: NSWorkspace.shared.frontmostApplication?.processIdentifier)
+        } else {
+            raw = try runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs)
+        }
         guard let data = raw.data(using: .utf8),
               let object = try JSONSerialization.jsonObject(with: data) as? [String: NSNumber],
               let screenX = object["screenX"]?.doubleValue,
@@ -275,7 +336,7 @@ final class BrowserAutomationBroker {
         .object(["value": .string(value)])
     }
 
-    private func createTabResult(_ value: String, requestedURL: String) throws -> JSONValue {
+    private func createTabResult(_ value: String, requestedURL: String, acceptedBy: String = "chrome_applescript_url_set") throws -> JSONValue {
         let separator = String(UnicodeScalar(30)!)
         let parts = value.components(separatedBy: separator)
         guard parts.count == 4, !parts[0].isEmpty, !parts[1].isEmpty, parts[2] == requestedURL else {
@@ -289,7 +350,7 @@ final class BrowserAutomationBroker {
                 "provenanceVersion": .number(1),
                 "requestedUrl": .string(requestedURL),
                 "assignmentAccepted": .bool(true),
-                "acceptedBy": .string("chrome_applescript_url_set"),
+                "acceptedBy": .string(acceptedBy),
                 "observedUrlAfterAssignment": .string(parts[3]),
             ]),
         ])
@@ -301,6 +362,59 @@ final class BrowserAutomationBroker {
         guard !parts.isEmpty else { return value }
         parts[0] = frontmostBundleIdentifier() == browser.bundleIdentifier ? "true" : "false"
         return parts.joined(separator: separator)
+    }
+
+    static func chromeProcessRoots(psOutput: String) -> [ChromeProcessRoot] {
+        var roots: [ChromeProcessRoot] = []
+        let executableMarker = "/Contents/MacOS/Google Chrome"
+        for line in psOutput.split(separator: "\n") {
+            let fields = line.trimmingCharacters(in: .whitespaces)
+                .split(maxSplits: 1, whereSeparator: { $0.isWhitespace })
+            guard fields.count == 2, let pid = Int32(fields[0]), pid > 0 else { continue }
+            let command = String(fields[1])
+            guard let marker = command.range(of: executableMarker) else { continue }
+            let path = command[..<marker.lowerBound]
+            let arguments = command[marker.upperBound...]
+            guard path.hasSuffix("/Google Chrome.app"),
+                  arguments.isEmpty || arguments.first?.isWhitespace == true else { continue }
+            // Helper/renderer paths cannot match the exact main executable.
+            let flags = arguments.split(whereSeparator: { $0.isWhitespace })
+            let headless = flags.contains { $0 == "--headless" || $0.hasPrefix("--headless=") }
+            roots.append(ChromeProcessRoot(pid: pid, headless: headless))
+        }
+        return roots
+    }
+
+    private static func liveChromeProcessRoots() throws -> [ChromeProcessRoot] {
+        let result = try runCommand("/bin/ps", ["-axo", "pid=,command="], 3_000)
+        guard result.status == 0, !result.stdout.isEmpty,
+              result.stdout.utf8.count < 8 * 1_048_576 else {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE",
+                              message: "Cannot establish the Chrome process roots before Apple Events.",
+                              retryable: true, domain: "browser")
+        }
+        return chromeProcessRoots(psOutput: result.stdout)
+    }
+
+    private func requireExactGuiChromeRoot() throws -> pid_t {
+        let roots: [ChromeProcessRoot]
+        do { roots = try chromeProcessProbe() }
+        catch {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE",
+                              message: "Cannot establish Chrome process identity; refusing Apple Events.",
+                              retryable: true, domain: "browser")
+        }
+        let guiRoots = roots.filter { !$0.headless }
+        guard guiRoots.count == 1, let gui = guiRoots.first else {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_TARGET_AMBIGUOUS",
+                              message: "No unique GUI Chrome process root exists; refusing to select a PID.",
+                              retryable: false, domain: "browser",
+                              details: .object([
+                                  "chromeRootCount": .number(Double(roots.count)),
+                                  "headlessRootCount": .number(Double(roots.filter { $0.headless }.count)),
+                              ]))
+        }
+        return gui.pid
     }
 
     private func runAppleScript(_ script: String, args: [String], timeoutMs: Int) throws -> String {
@@ -549,7 +663,8 @@ final class BrowserAutomationBroker {
         }
     }
 
-    private static func runCommand(_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult {
+    static func runCommand(_ executable: String, _ arguments: [String], _ timeoutMs: Int) throws -> BrowserAutomationCommandResult {
+        let startedAt = Date()
         let tempRoot = FileManager.default.temporaryDirectory
         let stdoutURL = tempRoot.appendingPathComponent("forge-desktop-broker-stdout-\(UUID().uuidString)")
         let stderrURL = tempRoot.appendingPathComponent("forge-desktop-broker-stderr-\(UUID().uuidString)")
@@ -575,12 +690,38 @@ final class BrowserAutomationBroker {
         environment["PATH"] = "/usr/bin:/bin:/usr/sbin:/sbin"
         process.environment = environment
         try process.run()
-        let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1_000)
+        let deadline = startedAt.addingTimeInterval(Double(timeoutMs) / 1_000)
         while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.02) }
         if process.isRunning {
+            let pid = process.processIdentifier
             process.terminate()
-            process.waitUntilExit()
-            throw PluginError(code: "BROWSER_AUTOMATION_TIMEOUT", message: "Browser automation command timed out", retryable: true, domain: "browser")
+            let terminateDeadline = Date().addingTimeInterval(Double(Self.terminateGraceMs) / 1_000)
+            while process.isRunning && Date() < terminateDeadline { Thread.sleep(forTimeInterval: 0.01) }
+
+            var forcedKill = false
+            if process.isRunning {
+                forcedKill = true
+                _ = Darwin.kill(pid, SIGKILL)
+                let killDeadline = Date().addingTimeInterval(Double(Self.forcedKillGraceMs) / 1_000)
+                while process.isRunning && Date() < killDeadline { Thread.sleep(forTimeInterval: 0.01) }
+            }
+            let processExited = !process.isRunning
+            if processExited { process.waitUntilExit() }
+            let formatter = ISO8601DateFormatter()
+            throw PluginError(
+                code: "BROWSER_AUTOMATION_TIMEOUT",
+                message: "Browser automation command exceeded its deadline; bounded termination completed",
+                retryable: true,
+                domain: "browser",
+                details: .object([
+                    "owner": .string("process:\(pid)"),
+                    "started_at": .string(formatter.string(from: startedAt)),
+                    "deadline": .string(formatter.string(from: deadline)),
+                    "timeout_ms": .number(Double(timeoutMs)),
+                    "forced_kill": .bool(forcedKill),
+                    "process_exited": .bool(processExited),
+                ])
+            )
         }
         process.waitUntilExit()
         try stdoutHandle.synchronize()

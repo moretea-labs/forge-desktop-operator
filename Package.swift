@@ -12,13 +12,21 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ChromeScriptingGlue",
+            path: "Sources/ChromeScriptingGlue",
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedFramework("ScriptingBridge")]
+        ),
+        .target(
             name: "DesktopOperatorCore",
+            dependencies: ["ChromeScriptingGlue"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
                 .linkedFramework("CoreGraphics"),
                 .linkedFramework("ImageIO"),
-                .linkedFramework("Security")
+                .linkedFramework("Security"),
+                .linkedFramework("ScriptingBridge")
             ]
         ),
         .executableTarget(

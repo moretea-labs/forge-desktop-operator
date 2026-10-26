@@ -214,6 +214,43 @@ import Testing
     #expect(elementActionCalls == 0)
 }
 
+@Test func computerElementActionsMatchObservedCapabilitiesInsteadOfGuessingFromRoles() {
+    func actions(_ role: String, _ raw: [String] = [], enabled: Bool? = true,
+                 expanded: Bool? = nil, writable: Set<String> = []) -> Set<String> {
+        Set(AccessibilityDriver.normalizedSemanticActions(
+            rawActions: raw, role: role, expanded: expanded,
+            enabled: enabled, writableAttributes: writable
+        ))
+    }
+
+    #expect(actions("AXButton", ["AXPress"]) == ["invoke"])
+    #expect(actions("AXButton", ["AXPress"], enabled: false).isEmpty)
+    #expect(actions("AXTextField").isEmpty)
+    #expect(actions("AXTextField", writable: ["AXValue", "AXFocused"]) == ["focus", "set_value"])
+    #expect(actions("AXSecureTextField", writable: ["AXValue"]).isEmpty)
+    #expect(actions("AXCheckBox", ["AXPress"]) == ["invoke", "toggle"])
+    #expect(actions("AXSwitch", writable: ["AXValue"]) == ["set_value"])
+    #expect(actions("AXSwitch", writable: ["AXValue", "AXBinaryToggleValue"]) == ["set_value", "toggle"])
+    #expect(actions("AXRadioButton", ["AXPress"]) == ["invoke", "select"])
+    #expect(actions("AXMenuItem", ["AXPick"]) == ["select"])
+    #expect(actions("AXMenuItem").isEmpty)
+    #expect(actions("AXMenuButton", ["AXShowMenu"]) == ["show_menu"])
+    #expect(actions("AXPopUpButton", ["AXShowDefaultUI"]) == ["open"])
+    #expect(actions("AXRow", expanded: false).isEmpty)
+    #expect(actions("AXRow", expanded: false, writable: ["AXDisclosing"]) == ["collapse", "expand", "open"])
+    #expect(actions("AXScrollArea", ["AXScrollDownByPage", "AXScrollUpByPage"]) == ["scroll_page_down", "scroll_page_up"])
+}
+
+@Test func computerElementBinaryValueToggleHasNoGuessForUnknownStates() {
+    #expect(AccessibilityDriver.nextToggleValue(.bool(true)) == .bool(false))
+    #expect(AccessibilityDriver.nextToggleValue(.bool(false)) == .bool(true))
+    #expect(AccessibilityDriver.nextToggleValue(.number(0)) == .number(1))
+    #expect(AccessibilityDriver.nextToggleValue(.number(1)) == .number(0))
+    #expect(AccessibilityDriver.nextToggleValue(.number(2)) == nil)
+    #expect(AccessibilityDriver.nextToggleValue(.string("on")) == nil)
+    #expect(AccessibilityDriver.nextToggleValue(nil) == nil)
+}
+
 @Test func normalizedComputerElementCarriesExactWindowContextAndObservedBoundsOnly() {
     let frame = DesktopFrame(x: 10, y: 20, width: 300, height: 200)
     let child = AXNode(
@@ -283,6 +320,50 @@ import Testing
     } catch let error as PluginError {
         #expect(error.code == "COMPUTER_ELEMENT_TARGET_MISMATCH")
     }
+}
+
+@Test func computerUnknownMutationRetiresEpochButPreconditionFailureDoesNot() {
+    let ax = AXUIElementCreateSystemWide()
+    let record = DesktopSessionRecord(
+        interactionId: "desk_unknown", pid: 123, bundleIdentifier: "com.example.Editor",
+        appName: "Editor", createdAt: Date(), lastObservedAt: Date(), snapshotRevision: 11
+    )
+    let session = DesktopSessionState(record: record)
+    session.elements["ax_11_1"] = ax
+
+    do {
+        _ = try PluginRuntime.performObservedElementMutation(session: session) {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_ACTION_UNSUPPORTED",
+                message: "Pre-dispatch rejection", retryable: false, domain: "accessibility"
+            )
+        }
+        Issue.record("Expected pre-dispatch error")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ELEMENT_ACTION_UNSUPPORTED")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+    #expect(session.record.snapshotRevision == 11)
+    #expect(session.elements["ax_11_1"] != nil)
+
+    do {
+        _ = try PluginRuntime.performObservedElementMutation(session: session) {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_MUTATION_OUTCOME_UNKNOWN",
+                message: "Native action may have been applied", retryable: false, domain: "accessibility"
+            )
+        }
+        Issue.record("Expected outcome-unknown error")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ELEMENT_MUTATION_OUTCOME_UNKNOWN")
+    } catch {
+        Issue.record("Unexpected error: \(error)")
+    }
+    #expect(session.record.snapshotRevision == 12)
+    #expect(session.record.lastObservedAt == nil)
+    #expect(session.elements.isEmpty)
+    #expect(session.elementWindowRefs.isEmpty)
 }
 
 @Test func computerElementBehaviorLoopRequiresFreshReobservationAfterSemanticMutation() throws {
