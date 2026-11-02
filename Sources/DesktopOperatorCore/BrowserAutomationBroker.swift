@@ -392,7 +392,10 @@ final class BrowserAutomationBroker {
             // automation-owned, not a second user-facing GUI Chrome process.
             let userDataDir = flags.first(where: { $0.hasPrefix("--user-data-dir=") })
                 .map { String($0.dropFirst("--user-data-dir=".count)) } ?? ""
+            let forgeRepositories = FileManager.default.homeDirectoryForCurrentUser.path
+                + "/.forge/controller/repositories/"
             let automationOwned = flags.contains("--remote-debugging-pipe")
+                && userDataDir.hasPrefix(forgeRepositories)
                 && userDataDir.contains("/browser/profiles/isolated/")
             roots.append(ChromeProcessRoot(pid: pid, headless: headless, automationOwned: automationOwned))
         }

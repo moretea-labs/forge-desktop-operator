@@ -17,8 +17,10 @@ import Testing
 
 @Test func browserAppleEventsChromeExcludesForgeManagedIsolatedPipeRoot() throws {
     let gui = "13433 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --restart"
-    let forgeManaged = "7398 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --disable-extensions --remote-debugging-pipe --user-data-dir=/Users/greyson/.forge/controller/repositories/controller:global/browser/profiles/isolated/browser_11d9d04b66dc9aef about:blank"
-    let userDebug = "7000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-pipe --user-data-dir=/tmp/user-profile"
+    let forgeDataDir = FileManager.default.homeDirectoryForCurrentUser.path
+        + "/.forge/controller/repositories/controller:global/browser/profiles/isolated/browser_11d9d04b66dc9aef"
+    let forgeManaged = "7398 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --disable-extensions --remote-debugging-pipe --user-data-dir=\(forgeDataDir) about:blank"
+    let userDebug = "7000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-pipe --user-data-dir=/tmp/browser/profiles/isolated/user-profile"
     let roots = BrowserAutomationBroker.chromeProcessRoots(psOutput: [gui, forgeManaged].joined(separator: "\n"))
     #expect(roots == [
         .init(pid: 13433, headless: false),
