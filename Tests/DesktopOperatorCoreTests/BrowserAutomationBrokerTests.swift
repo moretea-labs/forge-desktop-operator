@@ -15,10 +15,43 @@ import Testing
     #expect(BrowserAutomationBroker.chromeProcessRoots(psOutput: helper).isEmpty)
 }
 
+@Test func browserAppleEventsChromeExcludesForgeManagedIsolatedPipeRoot() throws {
+    let gui = "13433 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --restart"
+    let forgeManaged = "7398 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --disable-extensions --remote-debugging-pipe --user-data-dir=/Users/greyson/.forge/controller/repositories/controller:global/browser/profiles/isolated/browser_11d9d04b66dc9aef about:blank"
+    let userDebug = "7000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-pipe --user-data-dir=/tmp/user-profile"
+    let roots = BrowserAutomationBroker.chromeProcessRoots(psOutput: [gui, forgeManaged].joined(separator: "\n"))
+    #expect(roots == [
+        .init(pid: 13433, headless: false),
+        .init(pid: 7398, headless: false, automationOwned: true),
+    ])
+    let userDebugRoots = BrowserAutomationBroker.chromeProcessRoots(psOutput: userDebug)
+    #expect(userDebugRoots == [.init(pid: 7000, headless: false)])
+
+    var calls = 0
+    let broker = BrowserAutomationBroker(runner: { _, _, _ in
+        calls += 1
+        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://chatgpt.com/\u{1e}ChatGPT")
+    }, chromeProcessProbe: { roots })
+    let result = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "chrome-forge-managed-profile",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("metadata"),
+            "product": .string("chrome"),
+        ])
+    ))
+    #expect(result.ok)
+    #expect(calls == 1)
+}
+
 @Test func browserAppleEventsChromeAmbiguityFailsBeforeAnyScript() throws {
     let gui = BrowserAutomationBroker.ChromeProcessRoot(pid: 97438, headless: false)
+    let otherGui = BrowserAutomationBroker.ChromeProcessRoot(pid: 97439, headless: false)
     let headless = BrowserAutomationBroker.ChromeProcessRoot(pid: 28434, headless: true)
-    for sample in [[], [headless], [gui, gui], [gui, gui, headless]] {
+    let automationOwned = BrowserAutomationBroker.ChromeProcessRoot(
+        pid: 7398, headless: false, automationOwned: true)
+    for sample in [[], [headless], [gui, otherGui], [gui, otherGui, headless], [gui, otherGui, automationOwned]] {
         var appleEventsSent = 0
         let broker = BrowserAutomationBroker(runner: { _, _, _ in
             appleEventsSent += 1
