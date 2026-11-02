@@ -39,6 +39,13 @@ final class BrowserAutomationBroker {
     struct ChromeProcessRoot: Equatable {
         let pid: Int32
         let headless: Bool
+        let automationOwned: Bool
+
+        init(pid: Int32, headless: Bool, automationOwned: Bool = false) {
+            self.pid = pid
+            self.headless = headless
+            self.automationOwned = automationOwned
+        }
     }
     typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
 
@@ -380,7 +387,17 @@ final class BrowserAutomationBroker {
             // Helper/renderer paths cannot match the exact main executable.
             let flags = arguments.split(whereSeparator: { $0.isWhitespace })
             let headless = flags.contains { $0 == "--headless" || $0.hasPrefix("--headless=") }
-            roots.append(ChromeProcessRoot(pid: pid, headless: headless))
+            // Forge's persistent Playwright browser is a separate Chrome root,
+            // launched with a debugging pipe and an isolated profile. It is
+            // automation-owned, not a second user-facing GUI Chrome process.
+            let userDataDir = flags.first(where: { $0.hasPrefix("--user-data-dir=") })
+                .map { String($0.dropFirst("--user-data-dir=".count)) } ?? ""
+            let forgeRepositories = FileManager.default.homeDirectoryForCurrentUser.path
+                + "/.forge/controller/repositories/"
+            let automationOwned = flags.contains("--remote-debugging-pipe")
+                && userDataDir.hasPrefix(forgeRepositories)
+                && userDataDir.contains("/browser/profiles/isolated/")
+            roots.append(ChromeProcessRoot(pid: pid, headless: headless, automationOwned: automationOwned))
         }
         return roots
     }
@@ -404,7 +421,7 @@ final class BrowserAutomationBroker {
                               message: "Cannot establish Chrome process identity; refusing Apple Events.",
                               retryable: true, domain: "browser")
         }
-        let guiRoots = roots.filter { !$0.headless }
+        let guiRoots = roots.filter { !$0.headless && !$0.automationOwned }
         guard guiRoots.count == 1, let gui = guiRoots.first else {
             throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_TARGET_AMBIGUOUS",
                               message: "No unique GUI Chrome process root exists; refusing to select a PID.",
@@ -412,6 +429,7 @@ final class BrowserAutomationBroker {
                               details: .object([
                                   "chromeRootCount": .number(Double(roots.count)),
                                   "headlessRootCount": .number(Double(roots.filter { $0.headless }.count)),
+                                  "automationOwnedRootCount": .number(Double(roots.filter { $0.automationOwned }.count)),
                               ]))
         }
         return gui.pid
