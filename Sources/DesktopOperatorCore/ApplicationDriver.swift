@@ -4,6 +4,79 @@ import CoreGraphics
 import Darwin
 import Foundation
 
+struct ActivationDeadline: Sendable {
+    private let startUptimeNanoseconds: UInt64
+    private let uptimeDeadline: UInt64
+
+    init(timeoutSeconds: TimeInterval) {
+        let now = DispatchTime.now().uptimeNanoseconds
+        startUptimeNanoseconds = now
+        guard timeoutSeconds.isFinite, timeoutSeconds > 0 else {
+            uptimeDeadline = now
+            return
+        }
+        let available = UInt64.max - now
+        let nanoseconds = timeoutSeconds * 1_000_000_000
+        uptimeDeadline = now + (nanoseconds >= Double(available) ? available : UInt64(nanoseconds))
+    }
+
+    private init(startUptimeNanoseconds: UInt64, uptimeDeadline: UInt64) {
+        self.startUptimeNanoseconds = startUptimeNanoseconds
+        self.uptimeDeadline = uptimeDeadline
+    }
+
+    var remainingSeconds: TimeInterval {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard uptimeDeadline > now else { return 0 }
+        return Double(uptimeDeadline - now) / 1_000_000_000
+    }
+
+    var elapsedMilliseconds: Double {
+        Double(DispatchTime.now().uptimeNanoseconds - startUptimeNanoseconds) / 1_000_000
+    }
+
+    func limited(to seconds: TimeInterval) -> ActivationDeadline {
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard seconds.isFinite, seconds > 0 else {
+            return ActivationDeadline(startUptimeNanoseconds: startUptimeNanoseconds, uptimeDeadline: now)
+        }
+        let available = UInt64.max - now
+        let nanoseconds = seconds * 1_000_000_000
+        let stageDeadline = now + (nanoseconds >= Double(available) ? available : UInt64(nanoseconds))
+        return ActivationDeadline(startUptimeNanoseconds: startUptimeNanoseconds, uptimeDeadline: min(uptimeDeadline, stageDeadline))
+    }
+}
+
+private final class ActivationOutputBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private let limit: Int
+    private var data = Data()
+
+    init(limit: Int) {
+        self.limit = max(0, limit)
+    }
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        defer { lock.unlock() }
+        let remaining = limit - data.count
+        guard remaining > 0 else { return }
+        data.append(contentsOf: chunk.prefix(remaining))
+    }
+
+    func snapshot() -> Data {
+        lock.lock()
+        defer { lock.unlock() }
+        return data
+    }
+}
+
+struct ActivationProcessOutput {
+    let terminationStatus: Int32
+    let stdout: String
+    let stderr: String
+}
+
 public enum DesktopApplicationLaunchOwnership: String, Codable, Equatable, Sendable {
     case preexisting
     case providerLaunched = "provider_launched"
@@ -122,35 +195,37 @@ public enum ApplicationDriver {
         throw PluginError(code: "APP_LAUNCH_TIMEOUT", message: "Application did not appear in the GUI session", retryable: true, domain: "application")
     }
 
-    private static func waitForSystemFrontmost(pid: Int32, timeoutSeconds: TimeInterval) -> Bool {
-        if isActive(pid: pid) { return true }
-        let deadline = Date().addingTimeInterval(max(0, timeoutSeconds))
-        while Date() < deadline {
-            RunLoop.current.run(until: Date().addingTimeInterval(0.03))
-            if isActive(pid: pid) { return true }
+    private static func waitForSystemFrontmost(pid: Int32, deadline: ActivationDeadline) throws -> Bool {
+        guard deadline.remainingSeconds > 0 else { return false }
+        if try isActive(pid: pid, deadline: deadline) { return true }
+
+        while deadline.remainingSeconds > 0 {
+            RunLoop.current.run(until: Date().addingTimeInterval(min(0.03, deadline.remainingSeconds)))
+            guard deadline.remainingSeconds > 0 else { break }
+            if try isActive(pid: pid, deadline: deadline) { return true }
         }
-        return isActive(pid: pid)
+        return false
     }
 
-    private static func requestWorkspaceActivation(_ application: NSRunningApplication) -> Bool {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    private static func requestWorkspaceActivation(
+        _ application: NSRunningApplication,
+        deadline: ActivationDeadline
+    ) throws -> Bool {
+        let arguments: [String]
         if let bundleIdentifier = application.bundleIdentifier, !bundleIdentifier.isEmpty {
-            process.arguments = ["-b", bundleIdentifier]
+            arguments = ["-b", bundleIdentifier]
         } else if let appName = application.localizedName, !appName.isEmpty {
-            process.arguments = ["-a", appName]
+            arguments = ["-a", appName]
         } else {
             return false
         }
-        let errorPipe = Pipe()
-        process.standardError = errorPipe
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            return false
-        }
-        return process.terminationStatus == 0
+        let output = try runBoundedProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/open"),
+            arguments: arguments,
+            deadline: deadline,
+            stage: "workspace-open"
+        )
+        return output.terminationStatus == 0
     }
 
     private static func requestAccessibilityForeground(pid: Int32) -> AXError {
@@ -200,31 +275,68 @@ public enum ApplicationDriver {
     static func establishForegroundAuthority(
         pid: Int32,
         timeoutSeconds: TimeInterval,
+        initialFrontmostCheck: (ActivationDeadline) throws -> Bool,
         appKitActivate: () -> Bool,
-        workspaceActivate: () -> Bool,
+        workspaceActivate: (ActivationDeadline) throws -> Bool,
         accessibilityTrusted: () -> Bool,
         accessibilityActivate: () -> AXError,
-        waitForFrontmost: (TimeInterval) -> Bool
+        waitForFrontmost: (ActivationDeadline) throws -> Bool
     ) throws {
-        if waitForFrontmost(0) { return }
+        let deadline = ActivationDeadline(timeoutSeconds: timeoutSeconds)
+        var helperFailure: PluginError?
+        let initialCheck = deadline.limited(to: min(0.2, deadline.remainingSeconds))
+        do {
+            if try initialFrontmostCheck(initialCheck) { return }
+        } catch let error as PluginError {
+            if error.code == "APP_ACTIVATION_HELPER_REAP_FAILED" { throw error }
+            helperFailure = error
+        }
 
-        let appKitAccepted = appKitActivate()
+        let appKitAccepted = deadline.remainingSeconds > 0 ? appKitActivate() : false
         let appKitBudget = min(max(timeoutSeconds * 0.2, 0.1), 0.4)
-        if waitForFrontmost(appKitBudget) { return }
-
-        let workspaceRequested = workspaceActivate()
-        let workspaceBudget = min(max(timeoutSeconds * 0.5, 0.25), 1.0)
-        if workspaceRequested && waitForFrontmost(workspaceBudget) { return }
-
-        var accessibilityResult: AXError?
-        if accessibilityTrusted() {
-            accessibilityResult = accessibilityActivate()
-            if accessibilityResult == .success,
-               waitForFrontmost(max(0, timeoutSeconds - appKitBudget - workspaceBudget)) {
-                return
+        if deadline.remainingSeconds > 0 {
+            do {
+                if try waitForFrontmost(deadline.limited(to: appKitBudget)) { return }
+            } catch let error as PluginError {
+                if error.code == "APP_ACTIVATION_HELPER_REAP_FAILED" { throw error }
+                helperFailure = error
             }
         }
 
+        let workspaceBudget = min(max(timeoutSeconds * 0.5, 0.25), 1.0)
+        let workspaceDeadline = deadline.limited(to: workspaceBudget)
+        var workspaceRequested = false
+        if deadline.remainingSeconds > 0 {
+            do {
+                workspaceRequested = try workspaceActivate(workspaceDeadline)
+            } catch let error as PluginError {
+                if error.code == "APP_ACTIVATION_HELPER_REAP_FAILED" { throw error }
+                helperFailure = error
+            }
+        }
+        if workspaceRequested && deadline.remainingSeconds > 0 {
+            do {
+                if try waitForFrontmost(workspaceDeadline) { return }
+            } catch let error as PluginError {
+                if error.code == "APP_ACTIVATION_HELPER_REAP_FAILED" { throw error }
+                helperFailure = error
+            }
+        }
+
+        var accessibilityResult: AXError?
+        if deadline.remainingSeconds > 0, accessibilityTrusted() {
+            accessibilityResult = accessibilityActivate()
+            if accessibilityResult == .success, deadline.remainingSeconds > 0 {
+                do {
+                    if try waitForFrontmost(deadline) { return }
+                } catch let error as PluginError {
+                    if error.code == "APP_ACTIVATION_HELPER_REAP_FAILED" { throw error }
+                    helperFailure = error
+                }
+            }
+        }
+
+        if let helperFailure { throw helperFailure }
         if !appKitAccepted && !workspaceRequested && accessibilityResult != .success {
             throw PluginError(
                 code: "APP_ACTIVATION_FAILED",
@@ -238,10 +350,14 @@ public enum ApplicationDriver {
         throw PluginError(
             code: "APP_ACTIVATION_TIMEOUT",
             message: accessibilityResult == nil
-                ? "Target application did not become system foreground after AppKit and Workspace activation requests"
+                ? "Target application did not become system foreground before the shared activation deadline"
                 : "Target application did not become system foreground after AppKit, Workspace, and Accessibility activation requests",
             retryable: true,
-            domain: "application"
+            domain: "application",
+            details: .object([
+                "stage": .string("foreground-verification"),
+                "elapsed_ms": .number(deadline.elapsedMilliseconds)
+            ])
         )
     }
 
@@ -271,13 +387,14 @@ public enum ApplicationDriver {
         try establishForegroundAuthority(
             pid: pid,
             timeoutSeconds: timeoutSeconds,
+            initialFrontmostCheck: { try isActive(pid: pid, deadline: $0) },
             appKitActivate: {
                 application.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             },
-            workspaceActivate: { requestWorkspaceActivation(application) },
+            workspaceActivate: { try requestWorkspaceActivation(application, deadline: $0) },
             accessibilityTrusted: { AXIsProcessTrusted() },
             accessibilityActivate: { requestAccessibilityForeground(pid: pid) },
-            waitForFrontmost: { waitForSystemFrontmost(pid: pid, timeoutSeconds: $0) }
+            waitForFrontmost: { try waitForSystemFrontmost(pid: pid, deadline: $0) }
         )
     }
 
@@ -378,39 +495,166 @@ public enum ApplicationDriver {
         return Int32(token)
     }
 
-    private static func runLaunchServicesInfo(_ arguments: [String]) -> String? {
+    static func runBoundedProcess(
+        executableURL: URL,
+        arguments: [String],
+        deadline: ActivationDeadline,
+        stage: String,
+        maxOutputBytes: Int = 8_192
+    ) throws -> ActivationProcessOutput {
+        let startedAt = DispatchTime.now().uptimeNanoseconds
+        func elapsedMilliseconds() -> Double {
+            Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000
+        }
+        func errorDetails(helperPID: Int32? = nil, helperReaped: Bool? = nil) -> JSONValue {
+            var values: [String: JSONValue] = [
+                "stage": .string(stage),
+                "elapsed_ms": .number(elapsedMilliseconds()),
+                "activation_elapsed_ms": .number(deadline.elapsedMilliseconds)
+            ]
+            if let helperPID { values["helper_pid"] = .number(Double(helperPID)) }
+            if let helperReaped { values["helper_reaped"] = .bool(helperReaped) }
+            return .object(values)
+        }
+
+        guard deadline.remainingSeconds > 0 else {
+            throw PluginError(
+                code: "APP_ACTIVATION_HELPER_TIMEOUT",
+                message: "Activation helper \(stage) had no remaining foreground deadline budget",
+                retryable: true,
+                domain: "application",
+                details: errorDetails()
+            )
+        }
+
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/lsappinfo")
+        process.executableURL = executableURL
         process.arguments = arguments
-        let outputPipe = Pipe()
-        let errorPipe = Pipe()
-        process.standardOutput = outputPipe
-        process.standardError = errorPipe
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        let stdoutBuffer = ActivationOutputBuffer(limit: maxOutputBytes)
+        let stderrBuffer = ActivationOutputBuffer(limit: maxOutputBytes)
+        let outputDrained = DispatchGroup()
+        let terminated = DispatchSemaphore(value: 0)
+
+        func installReader(_ pipe: Pipe, buffer: ActivationOutputBuffer) {
+            outputDrained.enter()
+            pipe.fileHandleForReading.readabilityHandler = { handle in
+                let data = handle.availableData
+                if data.isEmpty {
+                    handle.readabilityHandler = nil
+                    outputDrained.leave()
+                } else {
+                    buffer.append(data)
+                }
+            }
+        }
+
+        func closePipes() {
+            stdoutPipe.fileHandleForReading.readabilityHandler = nil
+            stderrPipe.fileHandleForReading.readabilityHandler = nil
+            try? stdoutPipe.fileHandleForReading.close()
+            try? stderrPipe.fileHandleForReading.close()
+            try? stdoutPipe.fileHandleForWriting.close()
+            try? stderrPipe.fileHandleForWriting.close()
+        }
+
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+        installReader(stdoutPipe, buffer: stdoutBuffer)
+        installReader(stderrPipe, buffer: stderrBuffer)
+        process.terminationHandler = { _ in terminated.signal() }
+
         do {
             try process.run()
-            process.waitUntilExit()
         } catch {
-            return nil
+            closePipes()
+            throw PluginError(
+                code: "APP_ACTIVATION_HELPER_LAUNCH_FAILED",
+                message: "Activation helper \(stage) could not start: \(error.localizedDescription)",
+                retryable: true,
+                domain: "application",
+                details: errorDetails()
+            )
         }
-        guard process.terminationStatus == 0 else { return nil }
-        let data = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)
+
+        try? stdoutPipe.fileHandleForWriting.close()
+        try? stderrPipe.fileHandleForWriting.close()
+
+        if terminated.wait(timeout: .now() + deadline.remainingSeconds) == .timedOut {
+            let helperPID = process.processIdentifier
+            if process.isRunning {
+                process.terminate()
+            }
+            let reaped = terminated.wait(timeout: .now() + .milliseconds(200)) == .success || !process.isRunning
+            closePipes()
+            throw PluginError(
+                code: reaped ? "APP_ACTIVATION_HELPER_TIMEOUT" : "APP_ACTIVATION_HELPER_REAP_FAILED",
+                message: reaped
+                    ? "Activation helper \(stage) exceeded its shared foreground deadline and its exact child process was reaped"
+                    : "Activation helper \(stage) exceeded its deadline but its exact child did not exit within the cleanup grace",
+                retryable: true,
+                domain: "application",
+                details: errorDetails(helperPID: helperPID, helperReaped: reaped)
+            )
+        }
+
+        _ = outputDrained.wait(timeout: .now() + .milliseconds(25))
+        closePipes()
+        return ActivationProcessOutput(
+            terminationStatus: process.terminationStatus,
+            stdout: String(data: stdoutBuffer.snapshot(), encoding: .utf8) ?? "",
+            stderr: String(data: stderrBuffer.snapshot(), encoding: .utf8) ?? ""
+        )
     }
 
-    private static func launchServicesFrontmostPID() -> Int32? {
-        guard let front = runLaunchServicesInfo(["front"])?.trimmingCharacters(in: .whitespacesAndNewlines),
-              front.hasPrefix("ASN:"),
-              let info = runLaunchServicesInfo(["info", "-only", "pid", front])
+    private static func runLaunchServicesInfo(
+        _ arguments: [String],
+        deadline: ActivationDeadline,
+        stage: String
+    ) throws -> String? {
+        let output = try runBoundedProcess(
+            executableURL: URL(fileURLWithPath: "/usr/bin/lsappinfo"),
+            arguments: arguments,
+            deadline: deadline,
+            stage: stage
+        )
+        guard output.terminationStatus == 0 else { return nil }
+        return output.stdout
+    }
+
+    static func launchServicesFrontmostPID(
+        deadline: ActivationDeadline,
+        runHelper: ([String], ActivationDeadline, String) throws -> String?
+    ) throws -> Int32? {
+        guard let front = try runHelper(["front"], deadline, "launchservices-front")?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+            front.hasPrefix("ASN:"),
+            let info = try runHelper(["info", "-only", "pid", front], deadline, "launchservices-info")
         else { return nil }
         return parseLaunchServicesFrontmostPID(info)
+    }
+
+    private static func launchServicesFrontmostPID(deadline: ActivationDeadline) throws -> Int32? {
+        try launchServicesFrontmostPID(deadline: deadline) { arguments, deadline, stage in
+            try runLaunchServicesInfo(arguments, deadline: deadline, stage: stage)
+        }
     }
 
     static func foregroundMatches(pid: Int32, frontmostPID: Int32?) -> Bool {
         frontmostPID == pid
     }
 
+    static func isActive(pid: Int32, deadline: ActivationDeadline) throws -> Bool {
+        foregroundMatches(pid: pid, frontmostPID: try launchServicesFrontmostPID(deadline: deadline))
+    }
+
     public static func isActive(pid: Int32) -> Bool {
-        foregroundMatches(pid: pid, frontmostPID: launchServicesFrontmostPID())
+        do {
+            return try isActive(pid: pid, deadline: ActivationDeadline(timeoutSeconds: 0.5))
+        } catch {
+            return false
+        }
     }
 
     public static func openURL(_ value: String) throws {
@@ -463,7 +707,12 @@ public enum ApplicationDriver {
     }
 
     public static func runningApplicationSummaries(limit: Int = 100) -> [JSONValue] {
-        let frontmostPID = launchServicesFrontmostPID()
+        let frontmostPID: Int32?
+        do {
+            frontmostPID = try launchServicesFrontmostPID(deadline: ActivationDeadline(timeoutSeconds: 0.5))
+        } catch {
+            frontmostPID = nil
+        }
         return NSWorkspace.shared.runningApplications.prefix(max(1, min(limit, 500))).map { app in
             .object([
                 "pid": .number(Double(app.processIdentifier)),

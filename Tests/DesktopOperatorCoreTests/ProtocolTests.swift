@@ -174,70 +174,12 @@ import Testing
     try ApplicationDriver.establishForegroundAuthority(
         pid: 42,
         timeoutSeconds: 2,
+        initialFrontmostCheck: { _ in false },
         appKitActivate: {
             appKitCalls += 1
             return true
         },
-        workspaceActivate: {
-            workspaceCalls += 1
-            return true
-        },
-        accessibilityTrusted: { true },
-        accessibilityActivate: {
-            accessibilityCalls += 1
-            return .success
-        },
-        waitForFrontmost: { _ in
-            waitCalls += 1
-            return waitCalls >= 3
-        }
-    )
-    #expect(appKitCalls == 1)
-    #expect(workspaceCalls == 1)
-    #expect(accessibilityCalls == 0)
-    #expect(waitCalls == 3)
-}
-
-@Test func applicationActivationFallsBackToAccessibilityWhenWorkspaceStillDoesNotEstablishForeground() throws {
-    var workspaceCalls = 0
-    var accessibilityCalls = 0
-    var waitCalls = 0
-    try ApplicationDriver.establishForegroundAuthority(
-        pid: 42,
-        timeoutSeconds: 2,
-        appKitActivate: { true },
-        workspaceActivate: {
-            workspaceCalls += 1
-            return true
-        },
-        accessibilityTrusted: { true },
-        accessibilityActivate: {
-            accessibilityCalls += 1
-            return .success
-        },
-        waitForFrontmost: { _ in
-            waitCalls += 1
-            return waitCalls >= 4
-        }
-    )
-    #expect(workspaceCalls == 1)
-    #expect(accessibilityCalls == 1)
-    #expect(waitCalls == 4)
-}
-
-@Test func applicationActivationDoesNotUseFallbacksWhenAppKitEstablishesForeground() throws {
-    var appKitCalls = 0
-    var workspaceCalls = 0
-    var accessibilityCalls = 0
-    var waitCalls = 0
-    try ApplicationDriver.establishForegroundAuthority(
-        pid: 42,
-        timeoutSeconds: 2,
-        appKitActivate: {
-            appKitCalls += 1
-            return true
-        },
-        workspaceActivate: {
+        workspaceActivate: { _ in
             workspaceCalls += 1
             return true
         },
@@ -252,11 +194,281 @@ import Testing
         }
     )
     #expect(appKitCalls == 1)
-    #expect(workspaceCalls == 0)
+    #expect(workspaceCalls == 1)
     #expect(accessibilityCalls == 0)
     #expect(waitCalls == 2)
 }
 
+@Test func applicationActivationFallsBackToAccessibilityWhenWorkspaceStillDoesNotEstablishForeground() throws {
+    var workspaceCalls = 0
+    var accessibilityCalls = 0
+    var waitCalls = 0
+    try ApplicationDriver.establishForegroundAuthority(
+        pid: 42,
+        timeoutSeconds: 2,
+        initialFrontmostCheck: { _ in false },
+        appKitActivate: { true },
+        workspaceActivate: { _ in
+            workspaceCalls += 1
+            return true
+        },
+        accessibilityTrusted: { true },
+        accessibilityActivate: {
+            accessibilityCalls += 1
+            return .success
+        },
+        waitForFrontmost: { _ in
+            waitCalls += 1
+            return waitCalls >= 3
+        }
+    )
+    #expect(workspaceCalls == 1)
+    #expect(accessibilityCalls == 1)
+    #expect(waitCalls == 3)
+}
+
+@Test func applicationActivationDoesNotUseFallbacksWhenAppKitEstablishesForeground() throws {
+    var appKitCalls = 0
+    var workspaceCalls = 0
+    var accessibilityCalls = 0
+    var waitCalls = 0
+    try ApplicationDriver.establishForegroundAuthority(
+        pid: 42,
+        timeoutSeconds: 2,
+        initialFrontmostCheck: { _ in false },
+        appKitActivate: {
+            appKitCalls += 1
+            return true
+        },
+        workspaceActivate: { _ in
+            workspaceCalls += 1
+            return true
+        },
+        accessibilityTrusted: { true },
+        accessibilityActivate: {
+            accessibilityCalls += 1
+            return .success
+        },
+        waitForFrontmost: { _ in
+            waitCalls += 1
+            return waitCalls >= 1
+        }
+    )
+    #expect(appKitCalls == 1)
+    #expect(workspaceCalls == 0)
+    #expect(accessibilityCalls == 0)
+    #expect(waitCalls == 1)
+}
+
+
+@Test func applicationActivationStopsWhenWorkspaceHelperCannotBeReaped() throws {
+    var accessibilityCalls = 0
+    var capturedError: PluginError?
+    do {
+        try ApplicationDriver.establishForegroundAuthority(
+            pid: 42,
+            timeoutSeconds: 2,
+            initialFrontmostCheck: { _ in false },
+            appKitActivate: { false },
+            workspaceActivate: { _ in
+                throw PluginError(
+                    code: "APP_ACTIVATION_HELPER_REAP_FAILED",
+                    message: "workspace helper could not be reaped",
+                    retryable: true,
+                    domain: "application",
+                    details: .object(["helper_reaped": .bool(false)])
+                )
+            },
+            accessibilityTrusted: { true },
+            accessibilityActivate: {
+                accessibilityCalls += 1
+                return .success
+            },
+            waitForFrontmost: { _ in false }
+        )
+    } catch let error as PluginError {
+        capturedError = error
+    }
+    #expect(capturedError?.code == "APP_ACTIVATION_HELPER_REAP_FAILED")
+    #expect(accessibilityCalls == 0)
+}
+
+@Test func applicationActivationContinuesToAccessibilityAfterReapedWorkspaceTimeout() throws {
+    var workspaceCalls = 0
+    var accessibilityCalls = 0
+    var waitCalls = 0
+    try ApplicationDriver.establishForegroundAuthority(
+        pid: 42,
+        timeoutSeconds: 2,
+        initialFrontmostCheck: { _ in false },
+        appKitActivate: { true },
+        workspaceActivate: { _ in
+            workspaceCalls += 1
+            throw PluginError(
+                code: "APP_ACTIVATION_HELPER_TIMEOUT",
+                message: "workspace helper timed out and was reaped",
+                retryable: true,
+                domain: "application",
+                details: .object(["helper_reaped": .bool(true)])
+            )
+        },
+        accessibilityTrusted: { true },
+        accessibilityActivate: {
+            accessibilityCalls += 1
+            return .success
+        },
+        waitForFrontmost: { _ in
+            waitCalls += 1
+            return waitCalls >= 2
+        }
+    )
+    #expect(workspaceCalls == 1)
+    #expect(accessibilityCalls == 1)
+    #expect(waitCalls == 2)
+}
+
+@Test func applicationActivationWorkspaceHelperTimeoutIsBoundedAndReaped() throws {
+    let startedAt = DispatchTime.now().uptimeNanoseconds
+    var capturedError: PluginError?
+    do {
+        try ApplicationDriver.establishForegroundAuthority(
+            pid: 42,
+            timeoutSeconds: 0.1,
+            initialFrontmostCheck: { _ in false },
+            appKitActivate: { false },
+            workspaceActivate: { deadline in
+                _ = try ApplicationDriver.runBoundedProcess(
+                    executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                    arguments: ["5"],
+                    deadline: deadline,
+                    stage: "workspace-open"
+                )
+                return true
+            },
+            accessibilityTrusted: { false },
+            accessibilityActivate: { .success },
+            waitForFrontmost: { _ in false }
+        )
+    } catch let error as PluginError {
+        capturedError = error
+    }
+
+    let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
+    #expect(elapsed < 0.8)
+    #expect(capturedError?.code == "APP_ACTIVATION_HELPER_TIMEOUT")
+    #expect(capturedError?.details?["stage"]?.stringValue == "workspace-open")
+    #expect(capturedError?.details?["helper_reaped"]?.boolValue == true)
+    if let pid = capturedError?.details?["helper_pid"]?.intValue {
+        #expect(!ApplicationDriver.processIsAlive(Int32(pid)))
+    } else {
+        #expect(Bool(false), "The timeout must report the exact helper PID")
+    }
+}
+
+@Test func launchServicesFrontHelperTimeoutIsBoundedAndReaped() throws {
+    let startedAt = DispatchTime.now().uptimeNanoseconds
+    var capturedError: PluginError?
+    do {
+        _ = try ApplicationDriver.launchServicesFrontmostPID(
+            deadline: ActivationDeadline(timeoutSeconds: 0.1)
+        ) { _, deadline, stage in
+            let output = try ApplicationDriver.runBoundedProcess(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["5"],
+                deadline: deadline,
+                stage: stage
+            )
+            return output.stdout
+        }
+    } catch let error as PluginError {
+        capturedError = error
+    }
+
+    let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
+    #expect(elapsed < 0.8)
+    #expect(capturedError?.code == "APP_ACTIVATION_HELPER_TIMEOUT")
+    #expect(capturedError?.details?["stage"]?.stringValue == "launchservices-front")
+    #expect(capturedError?.details?["helper_reaped"]?.boolValue == true)
+    if let pid = capturedError?.details?["helper_pid"]?.intValue {
+        #expect(!ApplicationDriver.processIsAlive(Int32(pid)))
+    } else {
+        #expect(Bool(false), "The timeout must report the exact helper PID")
+    }
+}
+
+@Test func launchServicesInfoHelperTimeoutIsBoundedAndReaped() throws {
+    let startedAt = DispatchTime.now().uptimeNanoseconds
+    var capturedError: PluginError?
+    do {
+        _ = try ApplicationDriver.launchServicesFrontmostPID(
+            deadline: ActivationDeadline(timeoutSeconds: 0.1)
+        ) { _, deadline, stage in
+            if stage == "launchservices-front" { return "ASN:123" }
+            let output = try ApplicationDriver.runBoundedProcess(
+                executableURL: URL(fileURLWithPath: "/bin/sleep"),
+                arguments: ["5"],
+                deadline: deadline,
+                stage: stage
+            )
+            return output.stdout
+        }
+    } catch let error as PluginError {
+        capturedError = error
+    }
+
+    let elapsed = Double(DispatchTime.now().uptimeNanoseconds - startedAt) / 1_000_000_000
+    #expect(elapsed < 0.8)
+    #expect(capturedError?.code == "APP_ACTIVATION_HELPER_TIMEOUT")
+    #expect(capturedError?.details?["stage"]?.stringValue == "launchservices-info")
+    #expect(capturedError?.details?["helper_reaped"]?.boolValue == true)
+    if let pid = capturedError?.details?["helper_pid"]?.intValue {
+        #expect(!ApplicationDriver.processIsAlive(Int32(pid)))
+    } else {
+        #expect(Bool(false), "The timeout must report the exact helper PID")
+    }
+}
+
+@Test func boundedActivationHelperDrainsOutputBeyondPipeCapacity() throws {
+    let output = try ApplicationDriver.runBoundedProcess(
+        executableURL: URL(fileURLWithPath: "/usr/bin/seq"),
+        arguments: ["1", "100000"],
+        deadline: ActivationDeadline(timeoutSeconds: 2),
+        stage: "test-output-drain",
+        maxOutputBytes: 64
+    )
+    #expect(output.terminationStatus == 0)
+    #expect(output.stdout.count == 64)
+}
+
+@Test func boundedActivationHelperCapsCapturedOutput() throws {
+    let output = try ApplicationDriver.runBoundedProcess(
+        executableURL: URL(fileURLWithPath: "/usr/bin/printf"),
+        arguments: ["%s", String(repeating: "x", count: 10_000)],
+        deadline: ActivationDeadline(timeoutSeconds: 1),
+        stage: "test-output-limit",
+        maxOutputBytes: 64
+    )
+    #expect(output.terminationStatus == 0)
+    #expect(output.stdout.count == 64)
+}
+
+@Test func boundedActivationHelperCapturesOutput() throws {
+    let output = try ApplicationDriver.runBoundedProcess(
+        executableURL: URL(fileURLWithPath: "/bin/echo"),
+        arguments: ["frontmost"],
+        deadline: ActivationDeadline(timeoutSeconds: 1),
+        stage: "test-output"
+    )
+    #expect(output.terminationStatus == 0)
+    #expect(output.stdout.trimmingCharacters(in: .whitespacesAndNewlines) == "frontmost")
+}
+
+@Test func activationStageDeadlineNeverExtendsSharedDeadline() {
+    let deadline = ActivationDeadline(timeoutSeconds: 0.5)
+    let stage = deadline.limited(to: 0.1)
+    #expect(stage.remainingSeconds <= deadline.remainingSeconds)
+    #expect(stage.remainingSeconds <= 0.1)
+}
 
 private func pointerTestWindow(frame: DesktopFrame, onScreen: Bool = true) -> DesktopWindow {
     DesktopWindow(windowId: 77, pid: 42, ownerName: "Test", title: "Window", layer: 0, alpha: 1, onScreen: onScreen, frame: frame)
