@@ -101,6 +101,54 @@ import Testing
     #expect(calls == 3)
 }
 
+@Test func browserReadTextUsesConstrainedSourceAndRejectsArbitraryJavascript() throws {
+    var capturedArguments: [String] = []
+    var calls = 0
+    let broker = BrowserAutomationBroker(runner: { _, args, _ in
+        calls += 1
+        capturedArguments = args
+        return BrowserAutomationCommandResult(status: 0, stdout: "{\"ok\":true,\"value\":\"read\",\"page\":{\"url\":\"https://example.com\",\"title\":\"Example\"}}")
+    })
+    let runtime = PluginRuntime(browserAutomation: broker)
+    let target: JSONValue = .object(["windowId": .string("7"), "tabId": .string("9")])
+    let read = runtime.handle(RPCRequest(
+        id: "native-read", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("vivaldi"), "ref": target,
+                         "selector": .string("#main")])
+    ))
+    #expect(read.ok)
+    #expect(calls == 1)
+    let source = try BrowserAutomationBroker.readTextJavaScript("#main")
+    #expect(source.contains("document.querySelector(selector)"))
+    #expect(source.contains("const selector = \"#main\";"))
+    #expect(!source.contains("eval("))
+    #expect(capturedArguments.contains(source))
+    let injected = "\"}; document.body.remove(); //"
+    let escaped = try BrowserAutomationBroker.readTextJavaScript(injected)
+    let encoded = escaped.components(separatedBy: "const selector = ").last?
+        .components(separatedBy: ";\n").first ?? ""
+    #expect(try JSONDecoder().decode(String.self, from: Data(encoded.utf8)) == injected)
+
+    let unsafe = runtime.handle(RPCRequest(
+        id: "unsafe-read", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("vivaldi"), "ref": target,
+                         "source": .string("document.body.remove()")])
+    ))
+    #expect(!unsafe.ok)
+    #expect(unsafe.error?.code == "BROWSER_AUTOMATION_READ_TEXT_INVALID")
+    #expect(calls == 1)
+
+    let unbound = runtime.handle(RPCRequest(
+        id: "unbound-read", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("vivaldi")])
+    ))
+    #expect(!unbound.ok)
+    #expect(calls == 1)
+}
+
 @Test func browserChromeDirectIdLookupOnlyRecoversExactReadOnlyMissingTab() {
     let moved = NSError(domain: NSOSStatusErrorDomain, code: -1728)
     let stalled = NSError(domain: NSOSStatusErrorDomain, code: -1712)
@@ -498,6 +546,14 @@ private final class BrowserRuntimeBox: @unchecked Sendable {
         params: .object(["protocolVersion": .number(1), "action": .string("metadata"), "product": .string("chrome")])
     ))
     #expect(metadata.ok)
+    let read = box.runtime.handle(RPCRequest(
+        id: "read-while-create", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("chrome"),
+                         "ref": .object(["windowId": .string("7"), "tabId": .string("9")]),
+                         "selector": .string("body")])
+    ))
+    #expect(read.ok)
     let competing = box.runtime.handle(RPCRequest(
         id: "competing-create", method: "macos_browser_automation",
         params: .object(["protocolVersion": .number(1), "action": .string("create_tab"), "product": .string("chrome"), "url": .string("https://competing.example")])

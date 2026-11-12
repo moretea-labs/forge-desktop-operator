@@ -23,7 +23,7 @@ enum ChromePidBoundAutomation {
     // Apple Event callbacks can arrive after an action was attempted. Even a
     // failed call may have changed a tab; never mark its outcome safe to replay.
     static func eventFailure(_ error: Error, action: String) -> PluginError {
-        let code = (action == "metadata" || action == "list_tabs")
+        let code = (action == "metadata" || action == "list_tabs" || action == "read_text")
             ? "BROWSER_AUTOMATION_NATIVE_EVENT_FAILED"
             : "BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN"
         return PluginError(
@@ -241,7 +241,7 @@ enum ChromePidBoundAutomation {
             let (_, tab) = try selected()
             ForgeChromeReloadTab(tab)
             return ""
-        case "execute_javascript":
+        case "execute_javascript", "read_text":
             guard let javascript else { throw error("BROWSER_AUTOMATION_JAVASCRIPT_INVALID", "Missing Chrome JavaScript") }
             let (_, tab) = try selected()
             return text(ForgeChromeExecuteJavascript(tab, javascript))

@@ -141,7 +141,7 @@ final class ComputerProviderRuntime {
 
     private func executeBrowserAutomation(_ params: JSONValue) throws -> JSONValue {
         let action = params["action"]?.stringValue
-        if action == "metadata" || action == "list_tabs" || action == "capture_region" {
+        if action == "metadata" || action == "list_tabs" || action == "capture_region" || action == "read_text" {
             return try legacyBrowserCompatibility.execute(params: params)
         }
         guard legacyBrowserMutationLock.try() else {

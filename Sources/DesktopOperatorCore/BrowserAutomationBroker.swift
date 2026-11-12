@@ -74,6 +74,7 @@ final class BrowserAutomationBroker {
         "navigate",
         "reload",
         "execute_javascript",
+        "read_text",
         "activate",
         "trusted_input",
         "capture_region",
@@ -156,8 +157,14 @@ final class BrowserAutomationBroker {
                 }
                 let scriptURL = ["create_tab", "navigate"].contains(action)
                     ? try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes) : nil
-                let source = action == "execute_javascript"
-                    ? try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes) : nil
+                let source: String?
+                if action == "read_text" {
+                    guard target != nil, object["source"] == nil else { throw invalid("BROWSER_AUTOMATION_READ_TEXT_INVALID") }
+                    source = try Self.readTextJavaScript(try boundedString(object["selector"] ?? .string(""), field: "SELECTOR", maxBytes: 8_192))
+                } else {
+                    source = action == "execute_javascript"
+                        ? try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes) : nil
+                }
                 let raw = try ChromePidBoundAutomation.execute(
                     pid: pid, action: action, windowId: target?.windowId, tabId: target?.tabId,
                     url: scriptURL, javascript: source, timeoutMs: timeoutMs,
@@ -190,6 +197,11 @@ final class BrowserAutomationBroker {
             return try valueResult(runAppleScript(reloadScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
         case "execute_javascript":
             let source = try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes)
+            return try valueResult(runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs))
+        case "read_text":
+            guard target != nil, object["source"] == nil else { throw invalid("BROWSER_AUTOMATION_READ_TEXT_INVALID") }
+            let selector = try boundedString(object["selector"] ?? .string(""), field: "SELECTOR", maxBytes: 8_192)
+            let source = try Self.readTextJavaScript(selector)
             return try valueResult(runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs))
         case "activate":
             return try valueResult(runAppleScript(activateScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
@@ -587,6 +599,22 @@ final class BrowserAutomationBroker {
     private func reloadScript(_ appName: String, _ target: TabRef?) -> String {
         tell(appName, target.map { "\(targetPreamble($0))\nreload targetTab" }
             ?? "if (count of windows) is 0 then error \"FORGE_NO_BROWSER_WINDOW\"\nreload active tab of front window")
+    }
+
+    // Only a CSS selector is accepted from the caller; arbitrary JavaScript
+    // never crosses the read-only bypass of the mutation serialization lock.
+    static func readTextJavaScript(_ selector: String) throws -> String {
+        let quoted = String(decoding: try JSONEncoder().encode(selector), as: UTF8.self)
+        return """
+        (() => {
+          try {
+            const selector = \(quoted);
+            const el = selector ? document.querySelector(selector) : document.body;
+            const value = String(el ? (el.innerText || el.textContent || '') : (selector ? '' : (document.documentElement?.textContent || '')));
+            return JSON.stringify({ok:true,value,page:{url:String(document.location.href || ''),title:String(document.title || '')}});
+          } catch (error) { return JSON.stringify({ok:false,error:String(error)}); }
+        })()
+        """
     }
 
     private func executeJavaScriptScript(_ appName: String, _ target: TabRef?) -> String {
