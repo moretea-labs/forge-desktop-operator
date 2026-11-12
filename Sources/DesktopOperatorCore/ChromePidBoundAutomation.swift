@@ -52,18 +52,22 @@ enum ChromePidBoundAutomation {
     private static func propertyText(_ object: SBObject, _ key: String) -> String {
         text(value(object, key))
     }
-    // SBElementArray is a lazy, live NSMutableArray proxy. Using Sequence.prefix
-    // invokes NSFastEnumeration and can raise NSRangeException when Chrome
-    // removes a window/tab between count and getObjects:range:. Evaluate the
-    // ScriptingBridge collection once, then enumerate the stable Swift array.
-    // The object references remain PID-bound; exact IDs must still be checked.
-    private static func windows(_ app: SBApplication) -> [SBObject] {
-        let snapshot = app.elementArray(withCode: code("cwin")).get() ?? []
-        return snapshot.prefix(maxWindows).compactMap { $0 as? SBObject }
+    // The ScriptingBridge collection can remain live after get(). Copy by
+    // bounded indexed access across the Objective-C exception boundary.
+    // A failed snapshot must not authorize any subsequent tab mutation.
+    private static func snapshot(_ elements: SBElementArray?, limit: Int) throws -> [SBObject] {
+        var nativeError: NSError?
+        guard let objects = ForgeChromeSnapshotElements(elements, UInt(limit), &nativeError) else {
+            throw error("BROWSER_AUTOMATION_NATIVE_COLLECTION_CHANGED",
+                        nativeError?.localizedDescription ?? "Chrome collection could not be snapshotted")
+        }
+        return objects
     }
-    private static func tabs(_ window: SBObject) -> [SBObject] {
-        let snapshot = window.elementArray(withCode: code("CrTb")).get() ?? []
-        return snapshot.prefix(maxTabs).compactMap { $0 as? SBObject }
+    private static func windows(_ app: SBApplication) throws -> [SBObject] {
+        try snapshot(app.elementArray(withCode: code("cwin")), limit: maxWindows)
+    }
+    private static func tabs(_ window: SBObject) throws -> [SBObject] {
+        try snapshot(window.elementArray(withCode: code("CrTb")), limit: maxTabs)
     }
 
     private static func boundedField(_ field: String) -> String {
@@ -77,15 +81,30 @@ enum ChromePidBoundAutomation {
         return tab
     }
     private static func exactTab(_ windows: [SBObject], windowId: String, tabId: String) throws -> (SBObject, SBObject) {
-        let matches = windows.flatMap { window -> [(SBObject, SBObject)] in
-            tabs(window).filter { propertyText($0, "ID  ") == tabId }.map { (window, $0) }
+        // The controller already has an exact window/tab pair. Prefer that
+        // window so an ordinary action does not enumerate every tab in every
+        // Chrome window (each ScriptingBridge property read sends Apple Events).
+        // A moved tab is the exceptional path: look up its globally unique tab
+        // ID only when the original window no longer contains it.
+        if !windowId.isEmpty {
+            let hintedWindows = windows.filter { propertyText($0, "ID  ") == windowId }
+            guard hintedWindows.count <= 1 else {
+                throw error("BROWSER_AUTOMATION_TAB_NOT_FOUND", "Chrome window identity is ambiguous")
+            }
+            if let window = hintedWindows.first {
+                let local = try tabs(window).filter { propertyText($0, "ID  ") == tabId }
+                guard local.count <= 1 else {
+                    throw error("BROWSER_AUTOMATION_TAB_NOT_FOUND", "Chrome tab identity is ambiguous")
+                }
+                if let tab = local.first { return (window, tab) }
+            }
+        }
+        let matches = try windows.flatMap { window -> [(SBObject, SBObject)] in
+            try tabs(window).filter { propertyText($0, "ID  ") == tabId }.map { (window, $0) }
         }
         guard matches.count == 1 else {
             throw error("BROWSER_AUTOMATION_TAB_NOT_FOUND", "Chrome tab identity is absent or ambiguous")
         }
-        // A moved tab keeps its tabId. A stale window hint does not silently
-        // resolve to a different tab; unique exact tabId is the authority.
-        _ = windowId
         return matches[0]
     }
     private static func error(_ code: String, _ message: String) -> PluginError {
@@ -116,7 +135,7 @@ enum ChromePidBoundAutomation {
         let result: String
         do {
           result = try { () throws -> String in
-        let allWindows = windows(app)
+        let allWindows = try windows(app)
         func selected() throws -> (SBObject, SBObject) {
             if let tabId, !tabId.isEmpty {
                 return try exactTab(allWindows, windowId: windowId ?? "", tabId: tabId)
@@ -150,7 +169,7 @@ enum ChromePidBoundAutomation {
             var truncated = false
             for window in allWindows {
                 let activeID = propertyText(try activeTab(window), "ID  ")
-                for tab in tabs(window) {
+                for tab in try tabs(window) {
                     if entries.count == maxTabs { truncated = true; break }
                     entries.append([
                         propertyText(window, "ID  "),
@@ -168,9 +187,9 @@ enum ChromePidBoundAutomation {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_INVALID", "Chrome tab creation needs a URL and an existing window")
             }
             let previousActiveID = propertyText(try activeTab(window), "ID  ")
-            let previous = Set(tabs(window).map { propertyText($0, "ID  ") })
+            let previous = Set(try tabs(window).map { propertyText($0, "ID  ") })
             window.elementArray(withCode: code("CrTb")).add(ForgeChromeTab(elementCode: code("CrTb"), properties: nil, data: nil))
-            let created = tabs(window).filter { !previous.contains(propertyText($0, "ID  ")) }
+            let created = try tabs(window).filter { !previous.contains(propertyText($0, "ID  ")) }
             guard created.count == 1, let tab = created.first else {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not return one newly created tab")
             }
@@ -180,7 +199,7 @@ enum ChromePidBoundAutomation {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not accept the exact requested URL")
             }
             if propertyText(try activeTab(window), "ID  ") == propertyText(tab, "ID  "),
-               let index = tabs(window).firstIndex(where: { propertyText($0, "ID  ") == previousActiveID }) {
+               let index = try tabs(window).firstIndex(where: { propertyText($0, "ID  ") == previousActiveID }) {
                 window.property(withCode: code("acTI")).setTo(NSNumber(value: index + 1))
             }
             return [propertyText(window, "ID  "), propertyText(tab, "ID  "), url, afterUrl].joined(separator: record)
@@ -203,7 +222,7 @@ enum ChromePidBoundAutomation {
             return text(ForgeChromeExecuteJavascript(tab, javascript))
         case "activate":
             let (window, tab) = try selected()
-            guard let index = tabs(window).firstIndex(where: { propertyText($0, "ID  ") == propertyText(tab, "ID  ") }) else {
+            guard let index = try tabs(window).firstIndex(where: { propertyText($0, "ID  ") == propertyText(tab, "ID  ") }) else {
                 throw error("BROWSER_AUTOMATION_TAB_NOT_FOUND", "Chrome tab disappeared before activation")
             }
             window.property(withCode: code("acTI")).setTo(NSNumber(value: index + 1))
