@@ -101,6 +101,17 @@ import Testing
     #expect(calls == 3)
 }
 
+@Test func browserChromeDirectIdLookupOnlyRecoversExactReadOnlyMissingTab() {
+    let moved = NSError(domain: NSOSStatusErrorDomain, code: -1728)
+    let stalled = NSError(domain: NSOSStatusErrorDomain, code: -1712)
+    let denied = NSError(domain: NSOSStatusErrorDomain, code: -1743)
+    let foreign = NSError(domain: NSCocoaErrorDomain, code: -1728)
+    #expect(ChromePidBoundAutomation.isExpectedMissingTabLookup(moved))
+    for failure in [stalled, denied, foreign] {
+        #expect(!ChromePidBoundAutomation.isExpectedMissingTabLookup(failure))
+    }
+}
+
 @Test func browserPidBoundChromeRejectsUnverifiedPIDWithoutLaunchingChrome() {
     do {
         _ = try ChromePidBoundAutomation.execute(
