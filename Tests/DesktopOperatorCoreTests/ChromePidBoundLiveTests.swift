@@ -2,6 +2,24 @@ import Foundation
 import Testing
 @testable import DesktopOperatorCore
 
+@Test func chromePidBoundEventFailureIncludesActionAndStage() {
+    let timeout = NSError(
+        domain: NSOSStatusErrorDomain,
+        code: -1712,
+        userInfo: [NSLocalizedDescriptionKey: "Apple Event timed out"]
+    )
+    let result = ChromePidBoundAutomation.eventFailure(
+        timeout,
+        action: "create_tab",
+        stage: "create_tab.snapshot_previous_tabs"
+    )
+    #expect(result.code == "BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN")
+    #expect(!result.retryable)
+    #expect(result.message.contains("action=create_tab"))
+    #expect(result.message.contains("stage=create_tab.snapshot_previous_tabs"))
+}
+
+
 /// Explicit, read-only real-Chrome acceptance. Never creates, navigates,
 /// activates, or closes a user tab. The PID must be supplied for this run.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))

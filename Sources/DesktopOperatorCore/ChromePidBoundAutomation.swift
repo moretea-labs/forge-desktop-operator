@@ -9,8 +9,16 @@ import ChromeScriptingGlue
 enum ChromePidBoundAutomation {
     private final class FailureRecorder: NSObject, SBApplicationDelegate {
         var lastError: Error?
+        var currentStage = "window_inventory"
+        var failedStage: String?
+
+        func begin(_ stage: String) {
+            currentStage = stage
+        }
+
         func eventDidFail(_ event: UnsafePointer<AppleEvent>, withError error: Error) -> Any? {
             lastError = error
+            failedStage = currentStage
             return nil
         }
     }
@@ -22,13 +30,13 @@ enum ChromePidBoundAutomation {
 
     // Apple Event callbacks can arrive after an action was attempted. Even a
     // failed call may have changed a tab; never mark its outcome safe to replay.
-    static func eventFailure(_ error: Error, action: String) -> PluginError {
+    static func eventFailure(_ error: Error, action: String, stage: String = "unknown") -> PluginError {
         let code = (action == "metadata" || action == "list_tabs" || action == "read_text")
             ? "BROWSER_AUTOMATION_NATIVE_EVENT_FAILED"
             : "BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN"
         return PluginError(
             code: code,
-            message: "Process-bound Chrome Apple Event failed: " +
+            message: "Process-bound Chrome Apple Event failed [action=\(action), stage=\(stage)]: " +
                 String(error.localizedDescription.prefix(1_000)),
             retryable: false,
             domain: "browser"
@@ -112,9 +120,13 @@ enum ChromePidBoundAutomation {
                         // window. Only that read-only lookup miss is safe to
                         // discard before searching by unique ID elsewhere.
                         guard isExpectedMissingTabLookup(failure) else {
-                            throw eventFailure(failure, action: "metadata")
+                            throw eventFailure(
+                                failure, action: "metadata",
+                                stage: failures.failedStage ?? "exact_tab_lookup"
+                            )
                         }
                         failures.lastError = nil
+                        failures.failedStage = nil
                     }
                 }
                 let local = try tabs(window).filter { propertyText($0, "ID  ") == tabId }
@@ -160,9 +172,11 @@ enum ChromePidBoundAutomation {
         let result: String
         do {
           result = try { () throws -> String in
+        failures.begin("window_inventory")
         let allWindows = try windows(app)
         func selected() throws -> (SBObject, SBObject) {
             if let tabId, !tabId.isEmpty {
+                failures.begin("resolve_exact_tab")
                 return try exactTab(allWindows, windowId: windowId ?? "", tabId: tabId, failures: failures)
             }
             guard action == "metadata" || action == "list_tabs" else {
@@ -171,6 +185,7 @@ enum ChromePidBoundAutomation {
             guard let window = allWindows.first else {
                 throw error("BROWSER_AUTOMATION_NO_WINDOW", "Chrome has no scriptable GUI window")
             }
+            failures.begin("read_active_tab")
             return (window, try activeTab(window))
         }
         switch action {
@@ -211,21 +226,32 @@ enum ChromePidBoundAutomation {
             guard let url, !url.isEmpty, let window = allWindows.first else {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_INVALID", "Chrome tab creation needs a URL and an existing window")
             }
+            failures.begin("create_tab.read_previous_active_tab")
             let previousActiveID = propertyText(try activeTab(window), "ID  ")
+            failures.begin("create_tab.snapshot_previous_tabs")
             let previous = Set(try tabs(window).map { propertyText($0, "ID  ") })
+            failures.begin("create_tab.add")
             window.elementArray(withCode: code("CrTb")).add(ForgeChromeTab(elementCode: code("CrTb"), properties: nil, data: nil))
+            failures.begin("create_tab.snapshot_created_tabs")
             let created = try tabs(window).filter { !previous.contains(propertyText($0, "ID  ")) }
             guard created.count == 1, let tab = created.first else {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not return one newly created tab")
             }
+            failures.begin("create_tab.set_url")
             tab.property(withCode: code("URL ")).setTo(url)
+            failures.begin("create_tab.verify_url")
             let afterUrl = propertyText(tab, "URL ")
             guard afterUrl == url else {
                 throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not accept the exact requested URL")
             }
-            if propertyText(try activeTab(window), "ID  ") == propertyText(tab, "ID  "),
-               let index = try tabs(window).firstIndex(where: { propertyText($0, "ID  ") == previousActiveID }) {
-                window.property(withCode: code("acTI")).setTo(NSNumber(value: index + 1))
+            failures.begin("create_tab.read_active_tab_after")
+            let activeAfterCreateID = propertyText(try activeTab(window), "ID  ")
+            if activeAfterCreateID == propertyText(tab, "ID  ") {
+                failures.begin("create_tab.snapshot_previous_active_tab_index")
+                if let index = try tabs(window).firstIndex(where: { propertyText($0, "ID  ") == previousActiveID }) {
+                    failures.begin("create_tab.restore_previous_active_tab")
+                    window.property(withCode: code("acTI")).setTo(NSNumber(value: index + 1))
+                }
             }
             return [propertyText(window, "ID  "), propertyText(tab, "ID  "), url, afterUrl].joined(separator: record)
         case "close_tab":
@@ -260,12 +286,18 @@ enum ChromePidBoundAutomation {
           }()
         } catch {
             if let failure = failures.lastError {
-                throw eventFailure(failure, action: action)
+                throw eventFailure(
+                    failure, action: action,
+                    stage: failures.failedStage ?? failures.currentStage
+                )
             }
             throw error
         }
         if let failure = failures.lastError {
-            throw eventFailure(failure, action: action)
+            throw eventFailure(
+                failure, action: action,
+                stage: failures.failedStage ?? failures.currentStage
+            )
         }
         return result
     }
