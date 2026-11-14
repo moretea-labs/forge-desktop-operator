@@ -39,6 +39,27 @@ void ForgeChromeReloadTab(SBObject *tab) {
     [tab sendEvent:'CrSu' id:'Rlod' parameters:0];
 }
 
+SBObject * _Nullable ForgeChromeElementAtIndex(
+    SBElementArray * _Nullable elements, NSUInteger index, NSError * _Nullable * _Nullable error) {
+    if (!elements) return nil;
+    @try {
+        id object = [elements objectAtIndex:index];
+        if (![object isKindOfClass:[SBObject class]]) {
+            if (error) *error = [NSError errorWithDomain:@"ForgeChromeScriptingBridge"
+                                                      code:4
+                                                  userInfo:@{NSLocalizedDescriptionKey: @"Indexed collection item was not an SBObject"}];
+            return nil;
+        }
+        return (SBObject *)object;
+    } @catch (NSException *exception) {
+        if (error) *error = [NSError errorWithDomain:@"ForgeChromeScriptingBridge"
+                                                  code:5
+                                              userInfo:@{NSLocalizedDescriptionKey:
+                                                  [NSString stringWithFormat:@"Indexed collection lookup failed: %@", exception.name]}];
+        return nil;
+    }
+}
+
 NSArray<SBObject *> * _Nullable ForgeChromeSnapshotElements(
     SBElementArray * _Nullable elements, NSUInteger limit, NSError * _Nullable * _Nullable error) {
     if (!elements) return @[];

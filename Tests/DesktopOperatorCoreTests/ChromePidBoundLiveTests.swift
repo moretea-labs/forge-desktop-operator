@@ -20,6 +20,55 @@ import Testing
 }
 
 
+/// Bounded, read-only hot-path acceptance against an explicitly supplied live
+/// Chrome GUI PID. Unlike the full-inventory acceptance, this only exercises
+/// front-window and exact window/tab resolution; it never creates or edits a tab.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyExactWindowHotPath() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0 else {
+        Issue.record("Expected an exact prevalidated GUI Chrome PID")
+        return
+    }
+    let separator = String(UnicodeScalar(30)!)
+    func metadata(windowId: String? = nil, tabId: String? = nil) throws -> [String] {
+        try ChromePidBoundAutomation.execute(
+            pid: pid, action: "metadata", windowId: windowId, tabId: tabId,
+            url: nil, javascript: nil, timeoutMs: 5_000, frontmostPID: nil
+        ).components(separatedBy: separator)
+    }
+    let front = try metadata()
+    guard front.count >= 10, !front[7].isEmpty, !front[8].isEmpty else {
+        Issue.record("Live Chrome front-window metadata lacks stable window/tab identity")
+        return
+    }
+    let windowId = front[7]
+    let tabId = front[8]
+    let samples = 8
+    var frontMs: [Double] = []
+    var exactMs: [Double] = []
+    for _ in 0..<samples {
+        let frontStarted = ProcessInfo.processInfo.systemUptime
+        let current = try metadata()
+        frontMs.append((ProcessInfo.processInfo.systemUptime - frontStarted) * 1_000)
+        #expect(current.count >= 10)
+        let exactStarted = ProcessInfo.processInfo.systemUptime
+        let bound = try metadata(windowId: windowId, tabId: tabId)
+        exactMs.append((ProcessInfo.processInfo.systemUptime - exactStarted) * 1_000)
+        #expect(bound.count >= 10)
+        guard bound.count >= 10 else { return }
+        #expect(bound[7] == windowId)
+        #expect(bound[8] == tabId)
+    }
+    func percentile(_ values: [Double], _ fraction: Double) -> Int {
+        let ordered = values.sorted()
+        return Int(ordered[max(0, min(ordered.count - 1, Int(ceil(Double(ordered.count) * fraction)) - 1))].rounded())
+    }
+    print("CHROME_PID_EXACT_WINDOW_HOTPATH_RESULT=PASS samples=\(samples) pid=\(pid) " +
+          "front_p50_ms=\(percentile(frontMs, 0.5)) front_p95_ms=\(percentile(frontMs, 0.95)) " +
+          "exact_p50_ms=\(percentile(exactMs, 0.5)) exact_p95_ms=\(percentile(exactMs, 0.95))")
+}
+
 /// Explicit, read-only real-Chrome acceptance. Never creates, navigates,
 /// activates, or closes a user tab. The PID must be supplied for this run.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
