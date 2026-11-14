@@ -398,7 +398,40 @@ public enum ApplicationDriver {
         )
     }
 
-    public static func ensureRunningWithProvenance(bundleIdentifier: String?, appName: String?, launch: Bool) throws -> ApplicationLaunchResult {
+    public static func ensureRunningWithProvenance(
+        bundleIdentifier: String?,
+        appName: String?,
+        launch: Bool,
+        exactProcessIdentifier: Int32? = nil,
+        exactBundlePath: String? = nil
+    ) throws -> ApplicationLaunchResult {
+        if let exactProcessIdentifier {
+            guard exactProcessIdentifier > 0, !launch else {
+                throw PluginError.invalidArguments("Exact process selection requires a positive process_id and launch=false")
+            }
+            guard let application = NSRunningApplication(processIdentifier: exactProcessIdentifier),
+                  !application.isTerminated, processIsAlive(exactProcessIdentifier) else {
+                throw PluginError(code: "APP_PROCESS_NOT_RUNNING", message: "The exact requested application process is not running", retryable: false, domain: "application")
+            }
+            if let bundleIdentifier, application.bundleIdentifier != bundleIdentifier {
+                throw PluginError(code: "APP_PROCESS_IDENTITY_MISMATCH", message: "The requested process has a different bundle identity", retryable: false, domain: "application")
+            }
+            if let appName, application.localizedName?.caseInsensitiveCompare(appName) != .orderedSame {
+                throw PluginError(code: "APP_PROCESS_IDENTITY_MISMATCH", message: "The requested process has a different application name", retryable: false, domain: "application")
+            }
+            if let exactBundlePath {
+                guard exactBundlePath.hasPrefix("/"),
+                      let actualURL = application.bundleURL,
+                      actualURL.standardizedFileURL.resolvingSymlinksInPath().path
+                        == URL(fileURLWithPath: exactBundlePath).standardizedFileURL.resolvingSymlinksInPath().path else {
+                    throw PluginError(code: "APP_BUNDLE_PATH_MISMATCH", message: "The requested process is not running from the exact application bundle path", retryable: false, domain: "application")
+                }
+            }
+            return ApplicationLaunchResult(application: application, ownership: .preexisting, ownedProcessIdentifier: nil)
+        }
+        guard exactBundlePath == nil else {
+            throw PluginError.invalidArguments("bundle_path requires exact process_id")
+        }
         if let running = findRunning(bundleIdentifier: bundleIdentifier, appName: appName) {
             return ApplicationLaunchResult(application: running, ownership: .preexisting, ownedProcessIdentifier: nil)
         }

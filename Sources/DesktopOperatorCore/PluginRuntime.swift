@@ -118,24 +118,43 @@ public final class PluginRuntime {
         case "desktop_session_open":
             let bundleId = object["bundle_id"]?.stringValue
             let appName = object["app_name"]?.stringValue
-            let launch = object["launch"]?.boolValue ?? true
+            let exactProcessId = object["process_id"]?.intValue
+            if object["process_id"] != nil {
+                guard let exactProcessId, exactProcessId > 0, exactProcessId <= Int(Int32.max) else {
+                    throw PluginError.invalidArguments("process_id must be a positive 32-bit application PID")
+                }
+            }
+            let exactBundlePath = object["bundle_path"]?.stringValue
+            if object["bundle_path"] != nil && (exactBundlePath == nil || exactBundlePath!.isEmpty) {
+                throw PluginError.invalidArguments("bundle_path must be a nonempty absolute path")
+            }
+            let launch = object["launch"]?.boolValue ?? (exactProcessId == nil)
             let activate = object["activate"]?.boolValue ?? false
             let reuseExisting = object["reuse_existing"]?.boolValue ?? true
             let openSession: () throws -> JSONValue = {
                 let launchResult = try ApplicationDriver.ensureRunningWithProvenance(
                     bundleIdentifier: bundleId,
                     appName: appName,
-                    launch: launch
+                    launch: launch,
+                    exactProcessIdentifier: exactProcessId.map(Int32.init),
+                    exactBundlePath: exactBundlePath
                 )
                 if activate {
                     try ApplicationDriver.activate(launchResult.application)
                 }
-                return try JSONValue.encode(self.sessions.create(
+                let record = try JSONValue.encode(self.sessions.create(
                     application: launchResult.application,
                     reuseExisting: reuseExisting,
                     applicationOwnership: launchResult.ownership,
-                    ownedProcessIdentifier: launchResult.ownedProcessIdentifier
+                    ownedProcessIdentifier: launchResult.ownedProcessIdentifier,
+                    exactProcessIdentifier: exactProcessId.map(Int32.init),
+                    exactBundlePath: exactBundlePath
                 ).record)
+                guard let exactProcessId, case var .object(fields) = record else { return record }
+                // A verified receipt prevents an older native provider from silently ignoring a PID/path selector.
+                fields["exactProcessId"] = .number(Double(exactProcessId))
+                fields["exactBundlePathVerified"] = .bool(exactBundlePath != nil)
+                return .object(fields)
             }
             return try activate ? withPhysicalInputLock(openSession) : openSession()
         case "desktop_observe":
