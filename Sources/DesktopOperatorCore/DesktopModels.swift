@@ -72,7 +72,7 @@ public struct ComputerElement: Codable, Equatable, Sendable {
     public let description: String?
     public let value: JSONValue?
     public let state: ComputerElementState
-    /// Observed geometry only. Bounds are never identity and never authorize pointer input.
+    /// Observed geometry only. Click additionally requires same-epoch window bounds and frontmost-window validation.
     public let bounds: DesktopFrame?
     /// Provider-neutral semantic actions supported by this observation.
     public let actions: [String]

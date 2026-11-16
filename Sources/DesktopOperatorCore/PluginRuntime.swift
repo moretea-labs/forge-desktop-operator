@@ -634,17 +634,23 @@ public final class PluginRuntime {
     private func executeComputerElementAction(_ arguments: JSONValue) throws -> JSONValue {
         let params = try decode(ComputerElementActionParams.self, from: arguments)
         let session = try sessions.get(params.target.interactionId)
-        return try session.withLock {
-            try Self.performObservedElementMutation(session: session) {
-                try accessibility.performElementAction(
-                    session: session,
-                    ref: params.ref,
-                    target: params.target,
-                    action: params.action,
-                    value: params.value
-                )
+        let perform = {
+            try session.withLock {
+                try Self.performObservedElementMutation(session: session) {
+                    try self.accessibility.performElementAction(
+                        session: session,
+                        ref: params.ref,
+                        target: params.target,
+                        action: params.action,
+                        value: params.value
+                    )
+                }
             }
         }
+        if params.action == "click" {
+            return try withPhysicalInputLock(perform)
+        }
+        return try perform()
     }
 
     static func performObservedElementMutation(
@@ -669,6 +675,7 @@ public final class PluginRuntime {
     static func retireObservedElementEpoch(_ session: DesktopSessionState) {
         session.elements.removeAll(keepingCapacity: false)
         session.elementWindowRefs.removeAll(keepingCapacity: false)
+        session.elementFrames.removeAll(keepingCapacity: false)
         session.lastRootElement = nil
         session.record.snapshotRevision += 1
         session.record.lastObservedAt = nil

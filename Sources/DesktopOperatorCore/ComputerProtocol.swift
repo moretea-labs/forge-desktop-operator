@@ -22,6 +22,7 @@ public enum ComputerProviderProtocol {
 
     public static let semanticElementActions = [
         "invoke",
+        "click",
         "focus",
         "set_value",
         "toggle",

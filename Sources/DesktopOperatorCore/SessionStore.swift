@@ -26,6 +26,8 @@ public final class DesktopSessionState {
     public var elements: [String: AXUIElement] = [:]
     /// Ephemeral observation-local element -> AX window ref binding. Never persisted.
     public var elementWindowRefs: [String: String] = [:]
+    /// Exact bounds captured with each observation ref. Never refreshed during an action.
+    public var elementFrames: [String: DesktopFrame] = [:]
     public var lastRootElement: AXUIElement?
     public var visualRevision: Int = 0
     public var lastVisualEvidence: DesktopVisualEvidence?
@@ -88,6 +90,7 @@ public final class DesktopSessionStore {
                 existing.record.pid = application.processIdentifier
                 existing.elements.removeAll(keepingCapacity: false)
                 existing.elementWindowRefs.removeAll(keepingCapacity: false)
+                existing.elementFrames.removeAll(keepingCapacity: false)
                 existing.lastRootElement = nil
             }
             return existing

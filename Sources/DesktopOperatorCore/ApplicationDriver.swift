@@ -739,6 +739,68 @@ public enum ApplicationDriver {
         }
     }
 
+    static var frontmostProcessIdentifier: Int32? {
+        NSWorkspace.shared.frontmostApplication?.processIdentifier
+    }
+
+    /// Resolves an observed AX window only when its exact CGWindow is the system-frontmost app window.
+    /// CGWindowListCopyWindowInfo preserves front-to-back ordering; ambiguous geometry fails closed.
+    static func resolveExactFrontmostWindowId(
+        pid: Int32,
+        windowFrame: DesktopFrame,
+        frontmostPID: Int32?,
+        windows: [DesktopWindow]
+    ) throws -> UInt32 {
+        let values = [windowFrame.x, windowFrame.y, windowFrame.width, windowFrame.height]
+        guard values.allSatisfy({ $0.isFinite }), windowFrame.width >= 1, windowFrame.height >= 1 else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_WINDOW_BOUNDS_INVALID",
+                message: "The observed AX window has invalid bounds.",
+                retryable: true,
+                domain: "input"
+            )
+        }
+        guard frontmostPID == pid else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_APP_NOT_FRONTMOST",
+                message: "Click is allowed only while the exact observed application is already system-frontmost; no activation is attempted.",
+                retryable: true,
+                domain: "input"
+            )
+        }
+
+        let visibleAppWindows = windows.filter {
+            $0.onScreen && $0.layer == 0 && $0.alpha.isFinite && $0.alpha > 0 && $0.frame != nil
+        }
+        guard let frontmost = visibleAppWindows.first else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_WINDOW_UNAVAILABLE",
+                message: "No visible application window can be verified for the observed target.",
+                retryable: true,
+                domain: "input"
+            )
+        }
+        guard frontmost.pid == pid, frontmost.frame == windowFrame else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_WINDOW_NOT_FRONTMOST",
+                message: "The exact AX window from the observation is not the system-frontmost application window.",
+                retryable: true,
+                domain: "input"
+            )
+        }
+
+        let matches = visibleAppWindows.filter { $0.pid == pid && $0.frame == windowFrame }
+        guard matches.count == 1, let exact = matches.first, exact.windowId == frontmost.windowId else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_WINDOW_AMBIGUOUS",
+                message: "The observed AX bounds do not resolve to one exact frontmost system window.",
+                retryable: true,
+                domain: "input"
+            )
+        }
+        return exact.windowId
+    }
+
     public static func runningApplicationSummaries(limit: Int = 100) -> [JSONValue] {
         let frontmostPID: Int32?
         do {

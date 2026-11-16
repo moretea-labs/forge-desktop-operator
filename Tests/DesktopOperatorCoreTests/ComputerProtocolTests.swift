@@ -188,6 +188,29 @@ import Testing
     #expect(routedArguments?["url"]?.stringValue == "https://example.com")
 }
 
+@Test func computerElementV2DispatchesObservedClickAsSemanticAction() throws {
+    var calls = 0
+    let runtime = ComputerProviderRuntime(browserAutomation: BrowserAutomationBroker { _, _, _ in
+        BrowserAutomationCommandResult(status: 0, stdout: "ok")
+    })
+    let result = try runtime.execute(
+        ComputerExecuteParams(
+            capability: ComputerProviderProtocol.elementActionCapability,
+            protocolVersion: ComputerProviderProtocol.elementProtocolVersion,
+            arguments: .object(["action": .string("click")])
+        ),
+        nativeAction: { _, _ in Issue.record("Unexpected native action"); return .null },
+        elementObserve: { _ in Issue.record("Unexpected element observe"); return .null },
+        elementAction: { arguments in
+            calls += 1
+            #expect(arguments["action"]?.stringValue == "click")
+            return .object(["action": .string("click")])
+        }
+    )
+    #expect(calls == 1)
+    #expect(result["action"]?.stringValue == "click")
+}
+
 @Test func computerElementV2RejectsUnknownSemanticActionBeforeProviderDispatch() throws {
     var elementActionCalls = 0
     let runtime = ComputerProviderRuntime(browserAutomation: BrowserAutomationBroker { _, _, _ in
@@ -216,10 +239,12 @@ import Testing
 
 @Test func computerElementActionsMatchObservedCapabilitiesInsteadOfGuessingFromRoles() {
     func actions(_ role: String, _ raw: [String] = [], enabled: Bool? = true,
-                 expanded: Bool? = nil, writable: Set<String> = []) -> Set<String> {
+                 expanded: Bool? = nil, writable: Set<String> = [],
+                 windowRef: String? = nil, frame: DesktopFrame? = nil) -> Set<String> {
         Set(AccessibilityDriver.normalizedSemanticActions(
             rawActions: raw, role: role, expanded: expanded,
-            enabled: enabled, writableAttributes: writable
+            enabled: enabled, writableAttributes: writable,
+            windowRef: windowRef, frame: frame
         ))
     }
 
@@ -239,6 +264,80 @@ import Testing
     #expect(actions("AXRow", expanded: false).isEmpty)
     #expect(actions("AXRow", expanded: false, writable: ["AXDisclosing"]) == ["collapse", "expand", "open"])
     #expect(actions("AXScrollArea", ["AXScrollDownByPage", "AXScrollUpByPage"]) == ["scroll_page_down", "scroll_page_up"])
+    let observedFrame = DesktopFrame(x: 10, y: 20, width: 40, height: 30)
+    #expect(actions("AXStaticText", windowRef: "ax_7_1", frame: observedFrame) == ["click"])
+    #expect(actions("AXStaticText", enabled: false, windowRef: "ax_7_1", frame: observedFrame).isEmpty)
+    #expect(actions("AXStaticText", windowRef: "ax_7_1").isEmpty)
+    #expect(actions("AXStaticText", frame: observedFrame).isEmpty)
+}
+
+@Test func computerElementClickRequiresExactFrontmostWindowAndUniqueBounds() throws {
+    let targetFrame = DesktopFrame(x: 100, y: 80, width: 420, height: 320)
+    let target = DesktopWindow(
+        windowId: 42, pid: 123, ownerName: "Google Chrome", title: nil,
+        layer: 0, alpha: 1, onScreen: true, frame: targetFrame
+    )
+    let background = DesktopWindow(
+        windowId: 41, pid: 123, ownerName: "Google Chrome", title: "Tab",
+        layer: 0, alpha: 1, onScreen: true,
+        frame: DesktopFrame(x: 0, y: 0, width: 900, height: 700)
+    )
+    #expect(try ApplicationDriver.resolveExactFrontmostWindowId(
+        pid: 123, windowFrame: targetFrame, frontmostPID: 123, windows: [target, background]
+    ) == 42)
+
+    do {
+        _ = try ApplicationDriver.resolveExactFrontmostWindowId(
+            pid: 123, windowFrame: targetFrame, frontmostPID: 999, windows: [target, background]
+        )
+        Issue.record("Expected non-frontmost application rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ELEMENT_CLICK_APP_NOT_FRONTMOST")
+    }
+
+    do {
+        _ = try ApplicationDriver.resolveExactFrontmostWindowId(
+            pid: 123, windowFrame: targetFrame, frontmostPID: 123, windows: [background, target]
+        )
+        Issue.record("Expected non-frontmost window rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ELEMENT_CLICK_WINDOW_NOT_FRONTMOST")
+    }
+
+    let duplicate = DesktopWindow(
+        windowId: 43, pid: 123, ownerName: "Google Chrome", title: "Duplicate",
+        layer: 0, alpha: 1, onScreen: true, frame: targetFrame
+    )
+    do {
+        _ = try ApplicationDriver.resolveExactFrontmostWindowId(
+            pid: 123, windowFrame: targetFrame, frontmostPID: 123, windows: [target, duplicate]
+        )
+        Issue.record("Expected ambiguous window geometry rejection")
+    } catch let error as PluginError {
+        #expect(error.code == "COMPUTER_ELEMENT_CLICK_WINDOW_AMBIGUOUS")
+    }
+}
+
+@Test func computerElementClickPointMustStayInsideObservedWindow() throws {
+    let display = DesktopFrame(x: 0, y: 0, width: 1_000, height: 800)
+    let window = DesktopFrame(x: 100, y: 100, width: 200, height: 200)
+    let element = DesktopFrame(x: 120, y: 130, width: 40, height: 30)
+    let point = try AccessibilityDriver.coordinateClickPoint(
+        frame: element, windowFrame: window, displayBounds: [display]
+    )
+    #expect(point.x == 140)
+    #expect(point.y == 145)
+
+    do {
+        _ = try AccessibilityDriver.coordinateClickPoint(
+            frame: DesktopFrame(x: 400, y: 400, width: 20, height: 20),
+            windowFrame: window,
+            displayBounds: [display]
+        )
+        Issue.record("Expected click outside the exact observed window to fail")
+    } catch let error as PluginError {
+        #expect(error.code == "COORDINATE_PRESS_OUTSIDE_WINDOW")
+    }
 }
 
 @Test func computerElementBinaryValueToggleHasNoGuessForUnknownStates() {
@@ -280,6 +379,7 @@ import Testing
     #expect(button.ref == "ax_4_2")
     #expect(button.bounds == frame)
     #expect(button.actions.contains("invoke"))
+    #expect(button.actions.contains("click"))
 }
 
 @Test func computerElementTargetIdentityRejectsCrossSessionAndWindowRefReuse() throws {
@@ -364,6 +464,7 @@ import Testing
     #expect(session.record.lastObservedAt == nil)
     #expect(session.elements.isEmpty)
     #expect(session.elementWindowRefs.isEmpty)
+    #expect(session.elementFrames.isEmpty)
 }
 
 @Test func computerElementBehaviorLoopRequiresFreshReobservationAfterSemanticMutation() throws {
@@ -384,6 +485,9 @@ import Testing
         session.elements[windowRef] = ax
         session.elements[elementRef] = ax
         session.elementWindowRefs[elementRef] = windowRef
+        let observedFrame = DesktopFrame(x: 0, y: 0, width: 100, height: 80)
+        session.elementFrames[windowRef] = observedFrame
+        session.elementFrames[elementRef] = DesktopFrame(x: 10, y: 10, width: 20, height: 20)
         session.record.snapshotRevision = revision
         session.record.lastObservedAt = Date()
         return ComputerElementTarget(
@@ -445,6 +549,7 @@ import Testing
     #expect(session.record.lastObservedAt == nil)
     #expect(session.elements.isEmpty)
     #expect(session.elementWindowRefs.isEmpty)
+    #expect(session.elementFrames.isEmpty)
 
     do {
         try AccessibilityDriver.validateObservedTargetIdentity(
