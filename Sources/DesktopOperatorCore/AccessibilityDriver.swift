@@ -223,6 +223,34 @@ public final class AccessibilityDriver {
         return actions.sorted()
     }
 
+    /// Common semantic actions depend only on the currently advertised AX
+    /// action, enabled state, and (for pointer click) the exact observed
+    /// window/frame. Avoid fetching unrelated focus/selection/disclosure and
+    /// writable AX attributes for these actions. Complex actions keep the
+    /// complete live capability validation below.
+    static func fastSemanticActionEligibility(
+        action: String,
+        rawActions: [String],
+        enabled: Bool?,
+        windowRef: String?,
+        frame: DesktopFrame?
+    ) -> Bool? {
+        switch action {
+        case "invoke":
+            return enabled != false && rawActions.contains(kAXPressAction as String)
+        case "show_menu":
+            return enabled != false && rawActions.contains(kAXShowMenuAction as String)
+        case "scroll_page_down":
+            return enabled != false && rawActions.contains("AXScrollDownByPage")
+        case "scroll_page_up":
+            return enabled != false && rawActions.contains("AXScrollUpByPage")
+        case "click":
+            return enabled != false && windowRef != nil && frame.map(Self.hasClickableFrame) == true
+        default:
+            return nil
+        }
+    }
+
     private static func hasClickableFrame(_ frame: DesktopFrame) -> Bool {
         [frame.x, frame.y, frame.width, frame.height].allSatisfy { $0.isFinite }
             && frame.width >= 1 && frame.height >= 1
@@ -655,27 +683,41 @@ public final class AccessibilityDriver {
             target: target
         )
         prepare(element)
-        let observedActions = actionNames(of: element)
-        let currentNode = AXNode(
-            ref: ref,
-            role: stringAttribute(element, kAXRoleAttribute as CFString),
-            subrole: nil, title: nil, identifier: nil, description: nil, value: nil,
-            enabled: boolAttribute(element, kAXEnabledAttribute as CFString),
-            focused: boolAttribute(element, kAXFocusedAttribute as CFString),
-            selected: boolAttribute(element, kAXSelectedAttribute as CFString),
-            expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
-            frame: session.elementFrames[ref], actions: observedActions, children: []
-        )
-        let supported = Set(Self.normalizedSemanticActions(
+        let enabled = boolAttribute(element, kAXEnabledAttribute as CFString)
+        // Pointer click is capability-gated by exact observed geometry, not
+        // AX action names. Do not request that unused AX metadata.
+        let observedActions = action == "click" ? [] : actionNames(of: element)
+        let eligible: Bool
+        if let fast = Self.fastSemanticActionEligibility(
+            action: action,
             rawActions: observedActions,
-            role: currentNode.role,
-            expanded: currentNode.expanded,
-            enabled: currentNode.enabled,
-            writableAttributes: Self.writableObservedAttributes(element: element, node: currentNode),
+            enabled: enabled,
             windowRef: target.windowRef,
-            frame: currentNode.frame
-        ))
-        guard supported.contains(action) else {
+            frame: session.elementFrames[ref]
+        ) {
+            eligible = fast
+        } else {
+            let currentNode = AXNode(
+                ref: ref,
+                role: stringAttribute(element, kAXRoleAttribute as CFString),
+                subrole: nil, title: nil, identifier: nil, description: nil, value: nil,
+                enabled: enabled,
+                focused: boolAttribute(element, kAXFocusedAttribute as CFString),
+                selected: boolAttribute(element, kAXSelectedAttribute as CFString),
+                expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
+                frame: session.elementFrames[ref], actions: observedActions, children: []
+            )
+            eligible = Self.normalizedSemanticActions(
+                rawActions: observedActions,
+                role: currentNode.role,
+                expanded: currentNode.expanded,
+                enabled: currentNode.enabled,
+                writableAttributes: Self.writableObservedAttributes(element: element, node: currentNode),
+                windowRef: target.windowRef,
+                frame: currentNode.frame
+            ).contains(action)
+        }
+        guard eligible else {
             throw PluginError(
                 code: "COMPUTER_ELEMENT_ACTION_UNSUPPORTED",
                 message: "Element \(ref) does not support semantic action \(action) in snapshot \(snapshotRevision)",
