@@ -416,11 +416,15 @@ final class BrowserAutomationBroker {
 
     private static func liveChromeProcessRoots() throws -> [ChromeProcessRoot] {
         let result = try runCommand("/bin/ps", ["-axo", "pid=,command="], 3_000)
-        guard result.status == 0, !result.stdout.isEmpty,
-              result.stdout.utf8.count < 8 * 1_048_576 else {
-            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE",
+        let outputBytes = result.stdout.utf8.count
+        guard result.status == 0, outputBytes > 0, outputBytes < 8 * 1_048_576 else {
+            throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_INVALID_OUTPUT",
                               message: "Cannot establish the Chrome process roots before Apple Events.",
-                              retryable: true, domain: "browser")
+                              retryable: true, domain: "browser",
+                              details: .object([
+                                  "exitStatus": .number(Double(result.status)),
+                                  "outputBytes": .number(Double(outputBytes)),
+                              ]))
         }
         return chromeProcessRoots(psOutput: result.stdout)
     }
@@ -429,9 +433,18 @@ final class BrowserAutomationBroker {
         let roots: [ChromeProcessRoot]
         do { roots = try chromeProcessProbe() }
         catch {
+            let underlying = error as NSError
+            var evidence: [String: JSONValue] = [
+                "errorDomain": .string(underlying.domain),
+                "errorCode": .number(Double(underlying.code)),
+            ]
+            if let cause = error as? PluginError {
+                evidence = ["causeCode": .string(cause.code)]
+                if let details = cause.details { evidence["causeDetails"] = details }
+            }
             throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE",
                               message: "Cannot establish Chrome process identity; refusing Apple Events.",
-                              retryable: true, domain: "browser")
+                              retryable: true, domain: "browser", details: .object(evidence))
         }
         let guiRoots = roots.filter { !$0.headless && !$0.automationOwned }
         guard guiRoots.count == 1, let gui = guiRoots.first else {
@@ -770,10 +783,10 @@ final class BrowserAutomationBroker {
             )
         }
         process.waitUntilExit()
-        try stdoutHandle.synchronize()
-        try stderrHandle.synchronize()
-        let stdout = String(decoding: (try? Data(contentsOf: stdoutURL)) ?? Data(), as: UTF8.self)
-        let stderr = String(decoding: (try? Data(contentsOf: stderrURL)) ?? Data(), as: UTF8.self)
+        // The child has exited. Its writes are visible to readers without
+        // forcing these disposable captures to durable storage.
+        let stdout = String(decoding: try Data(contentsOf: stdoutURL), as: UTF8.self)
+        let stderr = String(decoding: try Data(contentsOf: stderrURL), as: UTF8.self)
         return BrowserAutomationCommandResult(status: process.terminationStatus, stdout: stdout, stderr: stderr)
     }
 }

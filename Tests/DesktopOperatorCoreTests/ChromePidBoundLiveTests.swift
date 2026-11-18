@@ -1,6 +1,64 @@
 import Foundation
+import ScriptingBridge
+import ChromeScriptingGlue
 import Testing
 @testable import DesktopOperatorCore
+
+@Test func chromeActivationIndexReadsTargetOnceAndFailsClosedOnMissingIdentity() throws {
+    // Target and row indices are separate object handles even when their IDs
+    // agree; count every simulated Apple Event.
+    let candidates = Array(0..<26)
+    let target = 100
+    var reads: [Int: Int] = [:]
+    func read(_ handle: Int) -> String {
+        reads[handle, default: 0] += 1
+        return handle == target ? "25" : String(handle)
+    }
+    #expect(ChromePidBoundAutomation.activationIndex(
+        target: target, candidates: candidates, readID: read
+    ) == 25)
+    #expect(reads[target] == 1)
+    #expect(candidates.allSatisfy { reads[$0] == 1 })
+    #expect(reads.values.reduce(0, +) == 27)
+    reads = [:]
+    #expect(ChromePidBoundAutomation.activationIndex(
+        target: target, candidates: candidates, readID: { _ in "" }
+    ) == nil)
+    #expect(ChromePidBoundAutomation.activationIndex(
+        target: target, candidates: candidates, readID: { $0 == target ? "missing" : String($0) }
+    ) == nil)
+    struct Unavailable: Error {}
+    #expect(throws: Unavailable.self) {
+        try ChromePidBoundAutomation.activationIndex(
+            target: target, candidates: candidates, readID: { handle in
+                if handle == 4 { throw Unavailable() }
+                return read(handle)
+            }
+        )
+    }
+    #expect(reads[5] == nil)
+}
+
+@Test func chromeAppleEventTimeoutUsesSixtiethSecondTicks() {
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(0) == 1)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(1) == 1)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(16) == 1)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(17) == 2)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(100) == 6)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(1_000) == 60)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(5_000) == 300)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(8_000) == 480)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(30_000) == 1_800)
+    #expect(ChromePidBoundAutomation.appleEventTimeoutTicks(Int.max) > 0)
+}
+
+@Test func chromeAppleEventDeadlineDoesNotRenewPerEvent() {
+    #expect(ChromePidBoundAutomation.remainingEventTicks(deadline: 10, now: 5) == 300)
+    #expect(ChromePidBoundAutomation.remainingEventTicks(deadline: 10, now: 9) == 60)
+    #expect(ChromePidBoundAutomation.remainingEventTicks(deadline: 10, now: 9.99) == 1)
+    #expect(ChromePidBoundAutomation.remainingEventTicks(deadline: 10, now: 10) == nil)
+    #expect(ChromePidBoundAutomation.remainingEventTicks(deadline: 10, now: 11) == nil)
+}
 
 @Test func chromePidBoundEventFailureIncludesActionAndStage() {
     let timeout = NSError(
@@ -19,6 +77,55 @@ import Testing
     #expect(result.message.contains("stage=create_tab.snapshot_previous_tabs"))
 }
 
+
+/// Read-only A/B of the actual activation index scan against one stable
+/// Chrome window. Resolving an index does not activate that tab or window.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyActivationIndexTiming() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0,
+          let app = ForgeChromeApplication(processIdentifier: pid), app.isRunning else {
+        Issue.record("Expected an exact live GUI Chrome PID")
+        return
+    }
+    app.timeout = ChromePidBoundAutomation.appleEventTimeoutTicks(5_000)
+    func code(_ value: String) -> UInt32 {
+        value.utf8.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+    var nativeError: NSError?
+    guard let window = ForgeChromeElementAtIndex(app.elementArray(withCode: code("cwin")), 0, &nativeError),
+          let candidates = ForgeChromeSnapshotElements(window.elementArray(withCode: code("CrTb")), 500, &nativeError),
+          let target = candidates.last, candidates.count > 1 else {
+        Issue.record("Expected a stable window with multiple tabs")
+        return
+    }
+    struct IdentityUnavailable: Error {}
+    func readID(_ tab: SBObject) throws -> String {
+        let raw = tab.property(withCode: code("ID  ")).get()
+        let id = (raw as? NSNumber)?.stringValue ?? (raw as? String) ?? ""
+        guard !id.isEmpty else { throw IdentityUnavailable() }
+        return id
+    }
+    let initialIDs = try candidates.map(readID)
+    #expect(Set(initialIDs).count == candidates.count)
+    var before: [Int] = []
+    var after: [Int] = []
+    for _ in 0..<3 {
+        var started = ProcessInfo.processInfo.systemUptime
+        let oldIndex = try candidates.firstIndex { try readID($0) == readID(target) }
+        before.append(Int(((ProcessInfo.processInfo.systemUptime - started) * 1_000).rounded()))
+        started = ProcessInfo.processInfo.systemUptime
+        let newIndex = try ChromePidBoundAutomation.activationIndex(
+            target: target, candidates: candidates, readID: readID
+        )
+        after.append(Int(((ProcessInfo.processInfo.systemUptime - started) * 1_000).rounded()))
+        #expect(oldIndex == candidates.count - 1)
+        #expect(newIndex == oldIndex)
+    }
+    let finalIDs = try candidates.map(readID)
+    #expect(finalIDs == initialIDs)
+    print("CHROME_PID_READONLY_ACTIVATION_INDEX_TIMING tabs=\(candidates.count) before_ms=\(before) after_ms=\(after) before_median_ms=\(before.sorted()[1]) after_median_ms=\(after.sorted()[1])")
+}
 
 /// Bounded, read-only hot-path acceptance against an explicitly supplied live
 /// Chrome GUI PID. Unlike the full-inventory acceptance, this only exercises
@@ -103,6 +210,73 @@ func chromePidBoundReadOnlyRealChromeMetadataAndInventory() throws {
     print("CHROME_PID_READONLY_E2E_RESULT=PASS")
 }
 
+/// Same-process, read-only full inventory timing. No tab content leaves
+/// the test; only counts and durations are reported, even on repeated runs.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyInventoryTiming() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0 else { return }
+    let record = String(UnicodeScalar(30)!)
+    let field = String(UnicodeScalar(31)!)
+    var durations: [Int] = []
+    var tabCounts: [Int] = []
+    var windowCounts: [Int] = []
+    for _ in 0..<3 {
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = try ChromePidBoundAutomation.execute(
+            pid: pid, action: "list_tabs", windowId: nil, tabId: nil,
+            url: nil, javascript: nil, timeoutMs: 5_000, frontmostPID: nil
+        )
+        durations.append(Int(((ProcessInfo.processInfo.systemUptime - started) * 1_000).rounded()))
+        let records = result.components(separatedBy: record)
+        #expect(records.first == "false")
+        let rows = records.dropFirst().map { $0.components(separatedBy: field) }
+        #expect(!rows.isEmpty)
+        guard rows.allSatisfy({ $0.count == 5 && !$0[0].isEmpty && !$0[1].isEmpty &&
+            ($0[2] == "true" || $0[2] == "false") }) else {
+            Issue.record("Inventory row protocol or identity invalid")
+            return
+        }
+        #expect(Set(rows.map { $0[1] }).count == rows.count)
+        let windows = Dictionary(grouping: rows, by: { $0[0] })
+        #expect(windows.values.allSatisfy { $0.filter { $0[2] == "true" }.count == 1 })
+        tabCounts.append(rows.count)
+        windowCounts.append(windows.count)
+    }
+    print("CHROME_PID_READONLY_INVENTORY_TIMING samples=3 tabs=\(tabCounts) windows=\(windowCounts) ms=\(durations) median_ms=\(durations.sorted()[1])")
+}
+
+/// The full inventory cannot fit a 100ms action budget with a populated
+/// Chrome window. Verify against the real broker implementation that the
+/// native deadline stops the scan instead of renewing a timeout per tab.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyInventoryHonorsActionDeadline() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0 else { return }
+    let baseline = try ChromePidBoundAutomation.execute(
+        pid: pid, action: "list_tabs", windowId: nil, tabId: nil,
+        url: nil, javascript: nil, timeoutMs: 8_000, frontmostPID: nil
+    )
+    let tabCount = baseline.components(separatedBy: String(UnicodeScalar(30)!)).count - 1
+    guard tabCount >= 10 else {
+        Issue.record("Expected a populated existing Chrome inventory for the deadline test")
+        return
+    }
+    let start = ProcessInfo.processInfo.systemUptime
+    do {
+        _ = try ChromePidBoundAutomation.execute(
+            pid: pid, action: "list_tabs", windowId: nil, tabId: nil,
+            url: nil, javascript: nil, timeoutMs: 100, frontmostPID: nil
+        )
+        Issue.record("Inventory unexpectedly completed within the deliberately short action deadline")
+    } catch let e as PluginError {
+        let elapsed = Int(((ProcessInfo.processInfo.systemUptime - start) * 1_000).rounded())
+        #expect(e.code == "BROWSER_AUTOMATION_NATIVE_EVENT_FAILED")
+        #expect(e.message.contains("deadline") || e.message.contains("timed out") || e.message.contains("-1712"))
+        print("CHROME_READONLY_DEADLINE_RESULT tabs=\(tabCount) timeout_ms=100 elapsed_ms=\(elapsed) code=\(e.code)")
+    }
+}
+
 /// One optional mutation of a disposable tab. Never activates Chrome;
 /// cleanup closes only the tab ID returned by this create-tab action.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_MUTATION"] == "1"))
@@ -148,6 +322,12 @@ func chromePidBoundDisposableTabJavaScriptAndMultiFileSelection() throws {
     let result = try call("execute_javascript", window: window, tab: tab, js:
         "(() => { const input = document.createElement('input'); input.type='file'; input.multiple=true; document.body.append(input); const transfer = new DataTransfer(); transfer.items.add(new File(['first'], 'upload-one.txt')); transfer.items.add(new File(['second'], 'upload-two.txt')); input.files = transfer.files; input.dispatchEvent(new Event('change', { bubbles:true })); return Array.from(input.files).map(f => f.name + ':' + f.size).join(','); })()")
     #expect(result == "upload-one.txt:5,upload-two.txt:6")
+    // A single event above the previous erroneous 8-tick (~133ms)
+    // timeout must succeed within the real 8-second action budget.
+    let slow = try call("execute_javascript", window: window, tab: tab, js:
+        "(() => { const start = performance.now(); while (performance.now() - start < 240) {} return 'deadline-ok'; })()")
+    #expect(slow == "deadline-ok")
+
     // Closing our disposable tab must not navigate or activate the user's tab.
     let after = try call("metadata").components(separatedBy: separator)
     #expect(after.count >= 9)

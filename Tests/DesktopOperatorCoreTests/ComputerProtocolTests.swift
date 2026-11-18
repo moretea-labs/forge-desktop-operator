@@ -271,6 +271,50 @@ import Testing
     #expect(actions("AXStaticText", frame: observedFrame).isEmpty)
 }
 
+@Test func commonElementActionsFastPreflightMatchesCompleteLiveCapabilityPolicy() {
+    let actionNames = ["invoke", "show_menu", "scroll_page_up", "scroll_page_down", "click"]
+    let rawCases = [
+        [],
+        ["AXPress"],
+        ["AXShowMenu"],
+        ["AXScrollUpByPage"],
+        ["AXScrollDownByPage"],
+        ["AXPress", "AXShowMenu", "AXScrollUpByPage", "AXScrollDownByPage"]
+    ]
+    let enabledCases: [Bool?] = [nil, true, false]
+    let frameCases: [DesktopFrame?] = [
+        nil,
+        DesktopFrame(x: 10, y: 20, width: 40, height: 30),
+        DesktopFrame(x: 0, y: 0, width: 0, height: 30),
+        DesktopFrame(x: .infinity, y: 0, width: 40, height: 30)
+    ]
+    for action in actionNames {
+        for raw in rawCases {
+            for enabled in enabledCases {
+                for frame in frameCases {
+                    for windowRef in [nil, "ax_7_1"] as [String?] {
+                        let fast = AccessibilityDriver.fastSemanticActionEligibility(
+                            action: action, rawActions: raw, enabled: enabled,
+                            windowRef: windowRef, frame: frame
+                        )
+                        let complete = AccessibilityDriver.normalizedSemanticActions(
+                            rawActions: raw, role: "AXButton", expanded: nil, enabled: enabled,
+                            windowRef: windowRef, frame: frame
+                        ).contains(action)
+                        #expect(fast == complete)
+                    }
+                }
+            }
+        }
+    }
+    #expect(AccessibilityDriver.fastSemanticActionEligibility(
+        action: "set_value", rawActions: [], enabled: true, windowRef: nil, frame: nil
+    ) == nil)
+    #expect(AccessibilityDriver.fastSemanticActionEligibility(
+        action: "toggle", rawActions: ["AXPress"], enabled: true, windowRef: nil, frame: nil
+    ) == nil)
+}
+
 @Test func computerElementClickRequiresExactFrontmostWindowAndUniqueBounds() throws {
     let targetFrame = DesktopFrame(x: 100, y: 80, width: 420, height: 320)
     let target = DesktopWindow(
