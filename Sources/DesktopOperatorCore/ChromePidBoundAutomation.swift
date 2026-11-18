@@ -163,6 +163,19 @@ enum ChromePidBoundAutomation {
         }
         return matches[0]
     }
+    // An exact, validated target ID is invariant throughout the index scan.
+    // Keep one read per candidate and stop at the first match. In particular,
+    // never issue a mutation after an identity read fails.
+    static func activationIndex<T>(
+        target: T, candidates: [T], readID: (T) throws -> String
+    ) rethrows -> Int? {
+        let targetID = try readID(target)
+        guard !targetID.isEmpty else { return nil }
+        return try candidates.firstIndex { candidate in
+            try readID(candidate) == targetID
+        }
+    }
+
     private static func error(_ code: String, _ message: String) -> PluginError {
         PluginError(code: code, message: message, retryable: false, domain: "browser")
     }
@@ -297,7 +310,15 @@ enum ChromePidBoundAutomation {
             return text(ForgeChromeExecuteJavascript(tab, javascript))
         case "activate":
             let (window, tab) = try selected()
-            guard let index = try tabs(window).firstIndex(where: { propertyText($0, "ID  ") == propertyText(tab, "ID  ") }) else {
+            failures.begin("activate.resolve_tab_index")
+            let candidates = try tabs(window)
+            guard let index = try activationIndex(target: tab, candidates: candidates, readID: { element in
+                let id = propertyText(element, "ID  ")
+                if let failure = failures.lastError {
+                    throw eventFailure(failure, action: action, stage: failures.failedStage ?? "activate.resolve_tab_index")
+                }
+                return id
+            }) else {
                 throw error("BROWSER_AUTOMATION_TAB_NOT_FOUND", "Chrome tab disappeared before activation")
             }
             window.property(withCode: code("acTI")).setTo(NSNumber(value: index + 1))

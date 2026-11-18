@@ -2,6 +2,41 @@ import Foundation
 import Testing
 @testable import DesktopOperatorCore
 
+@Test func chromeActivationIndexReadsTargetOnceAndFailsClosedOnMissingIdentity() throws {
+    // Target and row indices are separate object handles even when their IDs
+    // agree; count every simulated Apple Event.
+    let candidates = Array(0..<26)
+    let target = 100
+    var reads: [Int: Int] = [:]
+    func read(_ handle: Int) -> String {
+        reads[handle, default: 0] += 1
+        return handle == target ? "25" : String(handle)
+    }
+    #expect(ChromePidBoundAutomation.activationIndex(
+        target: target, candidates: candidates, readID: read
+    ) == 25)
+    #expect(reads[target] == 1)
+    #expect(candidates.allSatisfy { reads[$0] == 1 })
+    #expect(reads.values.reduce(0, +) == 27)
+    reads = [:]
+    #expect(ChromePidBoundAutomation.activationIndex(
+        target: target, candidates: candidates, readID: { _ in "" }
+    ) == nil)
+    #expect(ChromePidBoundAutomation.activationIndex(
+        target: target, candidates: candidates, readID: { $0 == target ? "missing" : String($0) }
+    ) == nil)
+    struct Unavailable: Error {}
+    #expect(throws: Unavailable.self) {
+        try ChromePidBoundAutomation.activationIndex(
+            target: target, candidates: candidates, readID: { handle in
+                if handle == 4 { throw Unavailable() }
+                return read(handle)
+            }
+        )
+    }
+    #expect(reads[5] == nil)
+}
+
 @Test func chromePidBoundEventFailureIncludesActionAndStage() {
     let timeout = NSError(
         domain: NSOSStatusErrorDomain,
