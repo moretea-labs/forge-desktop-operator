@@ -101,6 +101,28 @@ import Testing
     #expect(calls == 3)
 }
 
+@Test func browserChromeProbeTimeoutPreservesPreDispatchEvidence() {
+    var eventsSent = 0
+    let broker = BrowserAutomationBroker(runner: { _, _, _ in
+        eventsSent += 1
+        return BrowserAutomationCommandResult(status: 0, stdout: "")
+    }, chromeProcessProbe: {
+        throw PluginError(code: "BROWSER_AUTOMATION_TIMEOUT", message: "probe timed out",
+                          retryable: true, domain: "browser",
+                          details: .object(["timeout_ms": .number(3_000)]))
+    })
+    let response = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "chrome-probe-timeout", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("metadata"), "product": .string("chrome")])
+    ))
+    #expect(!response.ok)
+    #expect(response.error?.code == "BROWSER_AUTOMATION_PROCESS_PROBE_UNAVAILABLE")
+    #expect(response.error?.retryable == true)
+    #expect(response.error?.details?["causeCode"]?.stringValue == "BROWSER_AUTOMATION_TIMEOUT")
+    #expect(response.error?.details?["causeDetails"]?["timeout_ms"]?.intValue == 3_000)
+    #expect(eventsSent == 0)
+}
+
 @Test func browserReadTextUsesConstrainedSourceAndRejectsArbitraryJavascript() throws {
     var capturedArguments: [String] = []
     var calls = 0
