@@ -1,4 +1,6 @@
 import Foundation
+import ScriptingBridge
+import ChromeScriptingGlue
 import Testing
 @testable import DesktopOperatorCore
 
@@ -54,6 +56,55 @@ import Testing
     #expect(result.message.contains("stage=create_tab.snapshot_previous_tabs"))
 }
 
+
+/// Read-only A/B of the actual activation index scan against one stable
+/// Chrome window. Resolving an index does not activate that tab or window.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyActivationIndexTiming() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0,
+          let app = ForgeChromeApplication(processIdentifier: pid), app.isRunning else {
+        Issue.record("Expected an exact live GUI Chrome PID")
+        return
+    }
+    app.timeout = 5
+    func code(_ value: String) -> UInt32 {
+        value.utf8.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+    var nativeError: NSError?
+    guard let window = ForgeChromeElementAtIndex(app.elementArray(withCode: code("cwin")), 0, &nativeError),
+          let candidates = ForgeChromeSnapshotElements(window.elementArray(withCode: code("CrTb")), 500, &nativeError),
+          let target = candidates.last, candidates.count > 1 else {
+        Issue.record("Expected a stable window with multiple tabs")
+        return
+    }
+    struct IdentityUnavailable: Error {}
+    func readID(_ tab: SBObject) throws -> String {
+        let raw = tab.property(withCode: code("ID  ")).get()
+        let id = (raw as? NSNumber)?.stringValue ?? (raw as? String) ?? ""
+        guard !id.isEmpty else { throw IdentityUnavailable() }
+        return id
+    }
+    let initialIDs = try candidates.map(readID)
+    #expect(Set(initialIDs).count == candidates.count)
+    var before: [Int] = []
+    var after: [Int] = []
+    for _ in 0..<3 {
+        var started = ProcessInfo.processInfo.systemUptime
+        let oldIndex = try candidates.firstIndex { try readID($0) == readID(target) }
+        before.append(Int(((ProcessInfo.processInfo.systemUptime - started) * 1_000).rounded()))
+        started = ProcessInfo.processInfo.systemUptime
+        let newIndex = try ChromePidBoundAutomation.activationIndex(
+            target: target, candidates: candidates, readID: readID
+        )
+        after.append(Int(((ProcessInfo.processInfo.systemUptime - started) * 1_000).rounded()))
+        #expect(oldIndex == candidates.count - 1)
+        #expect(newIndex == oldIndex)
+    }
+    let finalIDs = try candidates.map(readID)
+    #expect(finalIDs == initialIDs)
+    print("CHROME_PID_READONLY_ACTIVATION_INDEX_TIMING tabs=\(candidates.count) before_ms=\(before) after_ms=\(after) before_median_ms=\(before.sorted()[1]) after_median_ms=\(after.sorted()[1])")
+}
 
 /// Bounded, read-only hot-path acceptance against an explicitly supplied live
 /// Chrome GUI PID. Unlike the full-inventory acceptance, this only exercises
