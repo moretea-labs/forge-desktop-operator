@@ -103,6 +103,42 @@ func chromePidBoundReadOnlyRealChromeMetadataAndInventory() throws {
     print("CHROME_PID_READONLY_E2E_RESULT=PASS")
 }
 
+/// Same-process, read-only full inventory timing. No tab content leaves
+/// the test; only counts and durations are reported, even on repeated runs.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyInventoryTiming() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0 else { return }
+    let record = String(UnicodeScalar(30)!)
+    let field = String(UnicodeScalar(31)!)
+    var durations: [Int] = []
+    var tabCounts: [Int] = []
+    var windowCounts: [Int] = []
+    for _ in 0..<3 {
+        let started = ProcessInfo.processInfo.systemUptime
+        let result = try ChromePidBoundAutomation.execute(
+            pid: pid, action: "list_tabs", windowId: nil, tabId: nil,
+            url: nil, javascript: nil, timeoutMs: 5_000, frontmostPID: nil
+        )
+        durations.append(Int(((ProcessInfo.processInfo.systemUptime - started) * 1_000).rounded()))
+        let records = result.components(separatedBy: record)
+        #expect(records.first == "false")
+        let rows = records.dropFirst().map { $0.components(separatedBy: field) }
+        #expect(!rows.isEmpty)
+        guard rows.allSatisfy({ $0.count == 5 && !$0[0].isEmpty && !$0[1].isEmpty &&
+            ($0[2] == "true" || $0[2] == "false") }) else {
+            Issue.record("Inventory row protocol or identity invalid")
+            return
+        }
+        #expect(Set(rows.map { $0[1] }).count == rows.count)
+        let windows = Dictionary(grouping: rows, by: { $0[0] })
+        #expect(windows.values.allSatisfy { $0.filter { $0[2] == "true" }.count == 1 })
+        tabCounts.append(rows.count)
+        windowCounts.append(windows.count)
+    }
+    print("CHROME_PID_READONLY_INVENTORY_TIMING samples=3 tabs=\(tabCounts) windows=\(windowCounts) ms=\(durations) median_ms=\(durations.sorted()[1])")
+}
+
 /// One optional mutation of a disposable tab. Never activates Chrome;
 /// cleanup closes only the tab ID returned by this create-tab action.
 @Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_MUTATION"] == "1"))

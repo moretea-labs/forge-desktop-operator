@@ -225,13 +225,19 @@ enum ChromePidBoundAutomation {
             var entries: [String] = []
             var truncated = false
             for window in allWindows {
+                // Stable window identity is shared by every row belonging to
+                // this window. Do not send the same Apple Event for each tab.
+                let windowID = propertyText(window, "ID  ")
                 let activeID = propertyText(try activeTab(window), "ID  ")
                 for tab in try tabs(window) {
                     if entries.count == maxTabs { truncated = true; break }
+                    // One live tab ID supplies both row identity and the active
+                    // comparison. Keep the complete inventory and all fields.
+                    let tabID = propertyText(tab, "ID  ")
                     entries.append([
-                        propertyText(window, "ID  "),
-                        propertyText(tab, "ID  "),
-                        String(propertyText(tab, "ID  ") == activeID),
+                        windowID,
+                        tabID,
+                        String(tabID == activeID),
                         boundedField(propertyText(tab, "URL ")),
                         boundedField(propertyText(tab, "pnam")),
                     ].joined(separator: field))
