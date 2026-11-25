@@ -1,4 +1,6 @@
 import Foundation
+import ScriptingBridge
+import ChromeScriptingGlue
 import Testing
 @testable import DesktopOperatorCore
 
@@ -67,6 +69,53 @@ func chromePidBoundReadOnlyExactWindowHotPath() throws {
     print("CHROME_PID_EXACT_WINDOW_HOTPATH_RESULT=PASS samples=\(samples) pid=\(pid) " +
           "front_p50_ms=\(percentile(frontMs, 0.5)) front_p95_ms=\(percentile(frontMs, 0.95)) " +
           "exact_p50_ms=\(percentile(exactMs, 0.5)) exact_p95_ms=\(percentile(exactMs, 0.95))")
+}
+
+/// Isolate the two collection primitives used by native create_tab without
+/// creating or mutating a tab. The exact GUI Chrome PID must be supplied.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"] != nil))
+func chromePidBoundReadOnlyTabCountAndIndex() throws {
+    guard let raw = ProcessInfo.processInfo.environment["FORGE_TEST_CHROME_PID"],
+          let pid = Int32(raw), pid > 0,
+          let app = ForgeChromeApplication(processIdentifier: pid) else {
+        Issue.record("Expected an exact prevalidated GUI Chrome PID")
+        return
+    }
+    app.timeout = 8
+    func code(_ four: String) -> UInt32 {
+        four.utf8.reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+    }
+    var nativeError: NSError?
+    guard let window = ForgeChromeElementAtIndex(app.elementArray(withCode: code("cwin")), 0, &nativeError) else {
+        Issue.record("Chrome front window unavailable")
+        return
+    }
+    let tabs = window.elementArray(withCode: code("CrTb"))
+    let activeIndex = (window.property(withCode: code("acTI")).get() as? NSNumber)?.intValue ?? 0
+    #expect(activeIndex > 0)
+    let countSamples = 8
+    var countMs: [Double] = []
+    var indexMs: [Double] = []
+    for _ in 0..<countSamples {
+        let countStarted = ProcessInfo.processInfo.systemUptime
+        let count = tabs.count
+        countMs.append((ProcessInfo.processInfo.systemUptime - countStarted) * 1_000)
+        #expect(count >= activeIndex)
+        let indexStarted = ProcessInfo.processInfo.systemUptime
+        let item = ForgeChromeElementAtIndex(tabs, UInt(activeIndex - 1), &nativeError)
+        indexMs.append((ProcessInfo.processInfo.systemUptime - indexStarted) * 1_000)
+        let itemID = item?.property(withCode: code("ID  ")).get() as? String
+        let activeID = (window.property(withCode: code("acTa")).get() as? SBObject)?
+            .property(withCode: code("ID  ")).get() as? String
+        #expect(itemID == activeID, "Indexed active tab must resolve to the exact current active tab")
+    }
+    func percentile(_ values: [Double], _ fraction: Double) -> Int {
+        let ordered = values.sorted()
+        return Int(ordered[max(0, min(ordered.count - 1, Int(ceil(Double(ordered.count) * fraction)) - 1))].rounded())
+    }
+    print("CHROME_PID_TAB_COLLECTION_RESULT=PASS pid=\(pid) active_index=\(activeIndex) " +
+          "count_p50_ms=\(percentile(countMs, 0.5)) count_p95_ms=\(percentile(countMs, 0.95)) " +
+          "index_p50_ms=\(percentile(indexMs, 0.5)) index_p95_ms=\(percentile(indexMs, 0.95))")
 }
 
 /// Explicit, read-only real-Chrome acceptance. Never creates, navigates,

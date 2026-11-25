@@ -7,6 +7,11 @@ public enum UnixSocketClient {
         guard descriptor >= 0 else { throw socketError("socket") }
         defer { Darwin.close(descriptor) }
 
+        var noSigPipe: Int32 = 1
+        guard setsockopt(descriptor, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+            throw socketError("setsockopt_nosigpipe")
+        }
+
         var timeout = timeval(tv_sec: timeoutSeconds, tv_usec: 0)
         setsockopt(descriptor, SOL_SOCKET, SO_RCVTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))
         setsockopt(descriptor, SOL_SOCKET, SO_SNDTIMEO, &timeout, socklen_t(MemoryLayout<timeval>.size))

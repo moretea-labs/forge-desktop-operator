@@ -44,6 +44,8 @@ import Testing
     )
     first.visualRevision = 4
     first.lastVisualEvidence = evidence
+    first.elementWindowRefs["ax_4_2"] = "ax_4_1"
+    first.elementFrames["ax_4_1"] = DesktopFrame(x: 10, y: 20, width: 30, height: 40)
 
     let reused = try store.create(application: application, reuseExisting: true)
     #expect(reused === first)
@@ -51,6 +53,8 @@ import Testing
     #expect(reused.record.ownedProcessIdentifier == application.processIdentifier)
     #expect(reused.visualRevision == 4)
     #expect(reused.lastVisualEvidence == evidence)
+    #expect(reused.elementWindowRefs.isEmpty)
+    #expect(reused.elementFrames.isEmpty)
 }
 
 @Test func desktopSessionStoreRebindsPidAndDropsEphemeralHandles() throws {

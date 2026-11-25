@@ -166,6 +166,10 @@ enum ChromePidBoundAutomation {
     private static func error(_ code: String, _ message: String) -> PluginError {
         PluginError(code: code, message: message, retryable: false, domain: "browser")
     }
+    private static func throwIfEventFailed(_ failures: FailureRecorder, action: String, stage: String) throws {
+        guard let failure = failures.lastError else { return }
+        throw eventFailure(failure, action: action, stage: failures.failedStage ?? stage)
+    }
     private static func checkedApp(pid: pid_t, timeoutMs: Int) throws -> ForgeChromeApplication {
         guard let running = NSRunningApplication(processIdentifier: pid),
               running.bundleIdentifier == "com.google.Chrome",
@@ -246,32 +250,61 @@ enum ChromePidBoundAutomation {
             let window = try frontWindow(app, failures: failures)
             failures.begin("create_tab.read_previous_active_tab")
             let previousActiveID = propertyText(try activeTab(window), "ID  ")
-            failures.begin("create_tab.snapshot_previous_tabs")
-            let previous = Set(try tabs(window).map { propertyText($0, "ID  ") })
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.read_previous_active_tab")
+            failures.begin("create_tab.read_previous_active_tab_index")
+            let rawPreviousActiveIndex = propertyText(window, "acTI")
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.read_previous_active_tab_index")
+            guard let previousActiveIndex = Int(rawPreviousActiveIndex), previousActiveIndex > 0 else {
+                throw error("BROWSER_AUTOMATION_ACTIVE_TAB_INDEX_UNAVAILABLE",
+                            "Chrome did not provide the previous active tab index before creating a tab")
+            }
+            let createdWindowID = propertyText(window, "ID  ")
+            let tabCollection = window.elementArray(withCode: code("CrTb"))
+            failures.begin("create_tab.read_previous_tab_count")
+            let previousCount = tabCollection.count
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.read_previous_tab_count")
+            guard previousCount < maxTabs else {
+                throw error("BROWSER_AUTOMATION_CREATE_TAB_LIMIT_REACHED", "Chrome tab count reached the bounded create-tab limit")
+            }
             failures.begin("create_tab.add")
-            window.elementArray(withCode: code("CrTb")).add(ForgeChromeTab(elementCode: code("CrTb"), properties: nil, data: nil))
-            failures.begin("create_tab.snapshot_created_tabs")
-            let created = try tabs(window).filter { !previous.contains(propertyText($0, "ID  ")) }
-            guard created.count == 1, let tab = created.first else {
-                throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not return one newly created tab")
+            tabCollection.add(ForgeChromeTab(elementCode: code("CrTb"), properties: nil, data: nil))
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.add")
+            // SBElementArray.add appends to the ordered tab collection. Resolve
+            // that one new slot directly; a second live count query after the
+            // mutation adds latency and can time out while Chrome is reordering tabs.
+            failures.begin("create_tab.resolve_created_tab")
+            var nativeError: NSError?
+            guard let tab = ForgeChromeElementAtIndex(tabCollection, UInt(previousCount), &nativeError) else {
+                throw error("BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN",
+                            nativeError?.localizedDescription ?? "Chrome did not expose the newly appended tab")
             }
-            failures.begin("create_tab.set_url")
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.resolve_created_tab")
+            let createdTabID = propertyText(tab, "ID  ")
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.read_created_tab_id")
+            guard createdTabID != previousActiveID else {
+                throw error("BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN",
+                            "Chrome did not resolve a distinct newly appended tab [window_id=\(createdWindowID),tab_id=\(createdTabID)]")
+            }
+            // The tab collection appends new elements; the prior count plus the
+            // exact indexed object is the provenance proof. Avoid a second active
+            // tab Apple Event here: it is independent of the created tab identity.
+            failures.begin("create_tab.set_url[window_id=\(createdWindowID),tab_id=\(createdTabID)]")
             tab.property(withCode: code("URL ")).setTo(url)
-            failures.begin("create_tab.verify_url")
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.set_url")
+            failures.begin("create_tab.verify_url[window_id=\(createdWindowID),tab_id=\(createdTabID)]")
             let afterUrl = propertyText(tab, "URL ")
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.verify_url")
             guard afterUrl == url else {
-                throw error("BROWSER_AUTOMATION_CREATE_TAB_PROVENANCE_INVALID", "Chrome did not accept the exact requested URL")
+                throw error("BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN",
+                            "Chrome did not verify the requested URL on the exact created tab [window_id=\(createdWindowID),tab_id=\(createdTabID)]")
             }
-            failures.begin("create_tab.read_active_tab_after")
-            let activeAfterCreateID = propertyText(try activeTab(window), "ID  ")
-            if activeAfterCreateID == propertyText(tab, "ID  ") {
-                failures.begin("create_tab.snapshot_previous_active_tab_index")
-                if let index = try tabs(window).firstIndex(where: { propertyText($0, "ID  ") == previousActiveID }) {
-                    failures.begin("create_tab.restore_previous_active_tab")
-                    window.property(withCode: code("acTI")).setTo(NSNumber(value: index + 1))
-                }
-            }
-            return [propertyText(window, "ID  "), propertyText(tab, "ID  "), url, afterUrl].joined(separator: record)
+            // The exact new tab was already proven active before its URL was set.
+            // URL assignment does not change selection, so restore the captured
+            // previous index directly instead of issuing another active-tab read.
+            failures.begin("create_tab.restore_previous_active_tab[window_id=\(createdWindowID),tab_id=\(createdTabID)]")
+            window.property(withCode: code("acTI")).setTo(NSNumber(value: previousActiveIndex))
+            try throwIfEventFailed(failures, action: action, stage: "create_tab.restore_previous_active_tab")
+            return [createdWindowID, createdTabID, url, afterUrl].joined(separator: record)
         case "close_tab":
             let (_, tab) = try selected()
             ForgeChromeCloseTab(tab)
