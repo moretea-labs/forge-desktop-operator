@@ -15,10 +15,45 @@ import Testing
     #expect(BrowserAutomationBroker.chromeProcessRoots(psOutput: helper).isEmpty)
 }
 
+@Test func browserAppleEventsChromeExcludesForgeManagedIsolatedPipeRoot() throws {
+    let gui = "13433 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --restart"
+    let forgeDataDir = FileManager.default.homeDirectoryForCurrentUser.path
+        + "/.forge/controller/repositories/controller:global/browser/profiles/isolated/browser_11d9d04b66dc9aef"
+    let forgeManaged = "7398 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --disable-extensions --remote-debugging-pipe --user-data-dir=\(forgeDataDir) about:blank"
+    let userDebug = "7000 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --remote-debugging-pipe --user-data-dir=/tmp/browser/profiles/isolated/user-profile"
+    let roots = BrowserAutomationBroker.chromeProcessRoots(psOutput: [gui, forgeManaged].joined(separator: "\n"))
+    #expect(roots == [
+        .init(pid: 13433, headless: false),
+        .init(pid: 7398, headless: false, automationOwned: true),
+    ])
+    let userDebugRoots = BrowserAutomationBroker.chromeProcessRoots(psOutput: userDebug)
+    #expect(userDebugRoots == [.init(pid: 7000, headless: false)])
+
+    var calls = 0
+    let broker = BrowserAutomationBroker(runner: { _, _, _ in
+        calls += 1
+        return BrowserAutomationCommandResult(status: 0, stdout: "false\u{1e}https://chatgpt.com/\u{1e}ChatGPT")
+    }, chromeProcessProbe: { roots })
+    let result = PluginRuntime(browserAutomation: broker).handle(RPCRequest(
+        id: "chrome-forge-managed-profile",
+        method: "macos_browser_automation",
+        params: .object([
+            "protocolVersion": .number(1),
+            "action": .string("metadata"),
+            "product": .string("chrome"),
+        ])
+    ))
+    #expect(result.ok)
+    #expect(calls == 1)
+}
+
 @Test func browserAppleEventsChromeAmbiguityFailsBeforeAnyScript() throws {
     let gui = BrowserAutomationBroker.ChromeProcessRoot(pid: 97438, headless: false)
+    let otherGui = BrowserAutomationBroker.ChromeProcessRoot(pid: 97439, headless: false)
     let headless = BrowserAutomationBroker.ChromeProcessRoot(pid: 28434, headless: true)
-    for sample in [[], [headless], [gui, gui], [gui, gui, headless]] {
+    let automationOwned = BrowserAutomationBroker.ChromeProcessRoot(
+        pid: 7398, headless: false, automationOwned: true)
+    for sample in [[], [headless], [gui, otherGui], [gui, otherGui, headless], [gui, otherGui, automationOwned]] {
         var appleEventsSent = 0
         let broker = BrowserAutomationBroker(runner: { _, _, _ in
             appleEventsSent += 1
@@ -64,6 +99,65 @@ import Testing
     ))
     #expect(response.ok)
     #expect(calls == 3)
+}
+
+@Test func browserReadTextUsesConstrainedSourceAndRejectsArbitraryJavascript() throws {
+    var capturedArguments: [String] = []
+    var calls = 0
+    let broker = BrowserAutomationBroker(runner: { _, args, _ in
+        calls += 1
+        capturedArguments = args
+        return BrowserAutomationCommandResult(status: 0, stdout: "{\"ok\":true,\"value\":\"read\",\"page\":{\"url\":\"https://example.com\",\"title\":\"Example\"}}")
+    })
+    let runtime = PluginRuntime(browserAutomation: broker)
+    let target: JSONValue = .object(["windowId": .string("7"), "tabId": .string("9")])
+    let read = runtime.handle(RPCRequest(
+        id: "native-read", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("vivaldi"), "ref": target,
+                         "selector": .string("#main")])
+    ))
+    #expect(read.ok)
+    #expect(calls == 1)
+    let source = try BrowserAutomationBroker.readTextJavaScript("#main")
+    #expect(source.contains("document.querySelector(selector)"))
+    #expect(source.contains("const selector = \"#main\";"))
+    #expect(!source.contains("eval("))
+    #expect(capturedArguments.contains(source))
+    let injected = "\"}; document.body.remove(); //"
+    let escaped = try BrowserAutomationBroker.readTextJavaScript(injected)
+    let encoded = escaped.components(separatedBy: "const selector = ").last?
+        .components(separatedBy: ";\n").first ?? ""
+    #expect(try JSONDecoder().decode(String.self, from: Data(encoded.utf8)) == injected)
+
+    let unsafe = runtime.handle(RPCRequest(
+        id: "unsafe-read", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("vivaldi"), "ref": target,
+                         "source": .string("document.body.remove()")])
+    ))
+    #expect(!unsafe.ok)
+    #expect(unsafe.error?.code == "BROWSER_AUTOMATION_READ_TEXT_INVALID")
+    #expect(calls == 1)
+
+    let unbound = runtime.handle(RPCRequest(
+        id: "unbound-read", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("vivaldi")])
+    ))
+    #expect(!unbound.ok)
+    #expect(calls == 1)
+}
+
+@Test func browserChromeDirectIdLookupOnlyRecoversExactReadOnlyMissingTab() {
+    let moved = NSError(domain: NSOSStatusErrorDomain, code: -1728)
+    let stalled = NSError(domain: NSOSStatusErrorDomain, code: -1712)
+    let denied = NSError(domain: NSOSStatusErrorDomain, code: -1743)
+    let foreign = NSError(domain: NSCocoaErrorDomain, code: -1728)
+    #expect(ChromePidBoundAutomation.isExpectedMissingTabLookup(moved))
+    for failure in [stalled, denied, foreign] {
+        #expect(!ChromePidBoundAutomation.isExpectedMissingTabLookup(failure))
+    }
 }
 
 @Test func browserPidBoundChromeRejectsUnverifiedPIDWithoutLaunchingChrome() {
@@ -452,6 +546,14 @@ private final class BrowserRuntimeBox: @unchecked Sendable {
         params: .object(["protocolVersion": .number(1), "action": .string("metadata"), "product": .string("chrome")])
     ))
     #expect(metadata.ok)
+    let read = box.runtime.handle(RPCRequest(
+        id: "read-while-create", method: "macos_browser_automation",
+        params: .object(["protocolVersion": .number(1), "action": .string("read_text"),
+                         "product": .string("chrome"),
+                         "ref": .object(["windowId": .string("7"), "tabId": .string("9")]),
+                         "selector": .string("body")])
+    ))
+    #expect(read.ok)
     let competing = box.runtime.handle(RPCRequest(
         id: "competing-create", method: "macos_browser_automation",
         params: .object(["protocolVersion": .number(1), "action": .string("create_tab"), "product": .string("chrome"), "url": .string("https://competing.example")])

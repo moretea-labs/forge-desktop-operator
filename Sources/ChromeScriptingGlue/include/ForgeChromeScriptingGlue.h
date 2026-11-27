@@ -23,4 +23,14 @@ FOUNDATION_EXPORT id _Nullable ForgeChromeExecuteJavascript(SBObject *tab, NSStr
 FOUNDATION_EXPORT void ForgeChromeCloseTab(SBObject *tab);
 FOUNDATION_EXPORT void ForgeChromeReloadTab(SBObject *tab);
 
+// Resolve one indexed object without materializing the complete live collection.
+// Objective-C exceptions are converted to NSError at the bridge boundary.
+FOUNDATION_EXPORT SBObject * _Nullable ForgeChromeElementAtIndex(
+    SBElementArray * _Nullable elements, NSUInteger index, NSError * _Nullable * _Nullable error);
+
+// Convert a live ScriptingBridge collection to a bounded ordinary NSArray.
+// A concurrent Chrome window/tab mutation must fail closed, not crash the provider.
+FOUNDATION_EXPORT NSArray<SBObject *> * _Nullable ForgeChromeSnapshotElements(
+    SBElementArray * _Nullable elements, NSUInteger limit, NSError * _Nullable * _Nullable error);
+
 NS_ASSUME_NONNULL_END

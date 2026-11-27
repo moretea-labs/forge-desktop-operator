@@ -39,6 +39,13 @@ final class BrowserAutomationBroker {
     struct ChromeProcessRoot: Equatable {
         let pid: Int32
         let headless: Bool
+        let automationOwned: Bool
+
+        init(pid: Int32, headless: Bool, automationOwned: Bool = false) {
+            self.pid = pid
+            self.headless = headless
+            self.automationOwned = automationOwned
+        }
     }
     typealias TrustedInputPerformer = (BrowserAutomationTrustedInputCommand) throws -> Void
 
@@ -67,6 +74,7 @@ final class BrowserAutomationBroker {
         "navigate",
         "reload",
         "execute_javascript",
+        "read_text",
         "activate",
         "trusted_input",
         "capture_region",
@@ -149,8 +157,14 @@ final class BrowserAutomationBroker {
                 }
                 let scriptURL = ["create_tab", "navigate"].contains(action)
                     ? try boundedString(object["url"], field: "URL", maxBytes: Self.maxURLBytes) : nil
-                let source = action == "execute_javascript"
-                    ? try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes) : nil
+                let source: String?
+                if action == "read_text" {
+                    guard target != nil, object["source"] == nil else { throw invalid("BROWSER_AUTOMATION_READ_TEXT_INVALID") }
+                    source = try Self.readTextJavaScript(try boundedString(object["selector"] ?? .string(""), field: "SELECTOR", maxBytes: 8_192))
+                } else {
+                    source = action == "execute_javascript"
+                        ? try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes) : nil
+                }
                 let raw = try ChromePidBoundAutomation.execute(
                     pid: pid, action: action, windowId: target?.windowId, tabId: target?.tabId,
                     url: scriptURL, javascript: source, timeoutMs: timeoutMs,
@@ -183,6 +197,11 @@ final class BrowserAutomationBroker {
             return try valueResult(runAppleScript(reloadScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
         case "execute_javascript":
             let source = try boundedString(object["source"], field: "JAVASCRIPT", maxBytes: Self.maxJavaScriptBytes)
+            return try valueResult(runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs))
+        case "read_text":
+            guard target != nil, object["source"] == nil else { throw invalid("BROWSER_AUTOMATION_READ_TEXT_INVALID") }
+            let selector = try boundedString(object["selector"] ?? .string(""), field: "SELECTOR", maxBytes: 8_192)
+            let source = try Self.readTextJavaScript(selector)
             return try valueResult(runAppleScript(executeJavaScriptScript(browser.appName, target), args: [source], timeoutMs: timeoutMs))
         case "activate":
             return try valueResult(runAppleScript(activateScript(browser.appName, target), args: [], timeoutMs: timeoutMs))
@@ -380,7 +399,17 @@ final class BrowserAutomationBroker {
             // Helper/renderer paths cannot match the exact main executable.
             let flags = arguments.split(whereSeparator: { $0.isWhitespace })
             let headless = flags.contains { $0 == "--headless" || $0.hasPrefix("--headless=") }
-            roots.append(ChromeProcessRoot(pid: pid, headless: headless))
+            // Forge's persistent Playwright browser is a separate Chrome root,
+            // launched with a debugging pipe and an isolated profile. It is
+            // automation-owned, not a second user-facing GUI Chrome process.
+            let userDataDir = flags.first(where: { $0.hasPrefix("--user-data-dir=") })
+                .map { String($0.dropFirst("--user-data-dir=".count)) } ?? ""
+            let forgeRepositories = FileManager.default.homeDirectoryForCurrentUser.path
+                + "/.forge/controller/repositories/"
+            let automationOwned = flags.contains("--remote-debugging-pipe")
+                && userDataDir.hasPrefix(forgeRepositories)
+                && userDataDir.contains("/browser/profiles/isolated/")
+            roots.append(ChromeProcessRoot(pid: pid, headless: headless, automationOwned: automationOwned))
         }
         return roots
     }
@@ -404,7 +433,7 @@ final class BrowserAutomationBroker {
                               message: "Cannot establish Chrome process identity; refusing Apple Events.",
                               retryable: true, domain: "browser")
         }
-        let guiRoots = roots.filter { !$0.headless }
+        let guiRoots = roots.filter { !$0.headless && !$0.automationOwned }
         guard guiRoots.count == 1, let gui = guiRoots.first else {
             throw PluginError(code: "BROWSER_AUTOMATION_PROCESS_TARGET_AMBIGUOUS",
                               message: "No unique GUI Chrome process root exists; refusing to select a PID.",
@@ -412,6 +441,7 @@ final class BrowserAutomationBroker {
                               details: .object([
                                   "chromeRootCount": .number(Double(roots.count)),
                                   "headlessRootCount": .number(Double(roots.filter { $0.headless }.count)),
+                                  "automationOwnedRootCount": .number(Double(roots.filter { $0.automationOwned }.count)),
                               ]))
         }
         return gui.pid
@@ -569,6 +599,22 @@ final class BrowserAutomationBroker {
     private func reloadScript(_ appName: String, _ target: TabRef?) -> String {
         tell(appName, target.map { "\(targetPreamble($0))\nreload targetTab" }
             ?? "if (count of windows) is 0 then error \"FORGE_NO_BROWSER_WINDOW\"\nreload active tab of front window")
+    }
+
+    // Only a CSS selector is accepted from the caller; arbitrary JavaScript
+    // never crosses the read-only bypass of the mutation serialization lock.
+    static func readTextJavaScript(_ selector: String) throws -> String {
+        let quoted = String(decoding: try JSONEncoder().encode(selector), as: UTF8.self)
+        return """
+        (() => {
+          try {
+            const selector = \(quoted);
+            const el = selector ? document.querySelector(selector) : document.body;
+            const value = String(el ? (el.innerText || el.textContent || '') : (selector ? '' : (document.documentElement?.textContent || '')));
+            return JSON.stringify({ok:true,value,page:{url:String(document.location.href || ''),title:String(document.title || '')}});
+          } catch (error) { return JSON.stringify({ok:false,error:String(error)}); }
+        })()
+        """
     }
 
     private func executeJavaScriptScript(_ appName: String, _ target: TabRef?) -> String {

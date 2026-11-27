@@ -75,6 +75,8 @@ The handshake still declares `internalCapabilities=["macos_browser_automation.v1
 
 This adapter is not a public `execute` action and is not advertised in `computerCapabilities`. Forge owns Browser policy, durable tab/session identity, allowlists, and transaction composition. The provider exposes no arbitrary shell or arbitrary AppleScript method.
 
+For PID-bound Chrome, ordinary `metadata` and exact-window/tab actions resolve the requested ScriptingBridge window by its stable numeric ID and verify the tab ID before dispatch; they do **not** enumerate every Chrome window first. A tab that has moved to another window uses a bounded global scan only after its original identity lookup fails. Explicit `list_tabs` still performs a full bounded inventory and can have a separate Apple Events latency/timeout profile. A timed-out native mutation is `BROWSER_AUTOMATION_MUTATION_OUTCOME_UNKNOWN` and must be reconciled against its exact target before any retry; browser readiness does not prove an end-to-end operation succeeded.
+
 ## Batch
 
 `desktop_batch` accepts at most 50 non-batch actions. `on_error` is `stop` or `continue`; each executed step returns its own result or structured error. Batch execution does not create a second global semantic lock: individual actions keep their own native locking/fencing requirements.

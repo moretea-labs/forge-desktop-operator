@@ -50,6 +50,7 @@ public final class AccessibilityDriver {
         }
         session.elements.removeAll(keepingCapacity: true)
         session.elementWindowRefs.removeAll(keepingCapacity: true)
+        session.elementFrames.removeAll(keepingCapacity: true)
         session.record.snapshotRevision += 1
         session.record.lastObservedAt = Date()
 
@@ -135,7 +136,9 @@ public final class AccessibilityDriver {
             role: node.role,
             expanded: node.expanded,
             enabled: node.enabled,
-            writableAttributes: writableAttributes(node)
+            writableAttributes: writableAttributes(node),
+            windowRef: windowRef,
+            frame: node.frame
         )
         let target = ComputerElementTarget(
             interactionId: record.interactionId,
@@ -183,14 +186,16 @@ public final class AccessibilityDriver {
         }
     }
 
-    /// Advertise only actions for which the current element exposes an executable AX route.
-    /// The role identifies intent, but never grants a setter or an AX action by itself.
+    /// Advertise only executable semantic routes. Pointer click additionally requires
+    /// bounds and an exact observed AX window; the action revalidates foreground at dispatch.
     static func normalizedSemanticActions(
         rawActions: [String],
         role: String?,
         expanded: Bool?,
         enabled: Bool? = nil,
-        writableAttributes: Set<String> = []
+        writableAttributes: Set<String> = [],
+        windowRef: String? = nil,
+        frame: DesktopFrame? = nil
     ) -> [String] {
         guard enabled != false else { return [] }
         var actions = Set<String>()
@@ -214,7 +219,13 @@ public final class AccessibilityDriver {
         if canWriteValue && role != "AXSecureTextField" { actions.insert("set_value") }
         if isToggle && (canPress || writableAttributes.contains("AXBinaryToggleValue")) { actions.insert("toggle") }
         if writableAttributes.contains(kAXFocusedAttribute as String) { actions.insert("focus") }
+        if windowRef != nil, let frame, Self.hasClickableFrame(frame) { actions.insert("click") }
         return actions.sorted()
+    }
+
+    private static func hasClickableFrame(_ frame: DesktopFrame) -> Bool {
+        [frame.x, frame.y, frame.width, frame.height].allSatisfy { $0.isFinite }
+            && frame.width >= 1 && frame.height >= 1
     }
 
     private static func writableObservedAttributes(element: AXUIElement, node: AXNode) -> Set<String> {
@@ -485,6 +496,27 @@ public final class AccessibilityDriver {
         return (x, y)
     }
 
+    static func coordinateClickPoint(
+        frame: DesktopFrame,
+        windowFrame: DesktopFrame,
+        displayBounds: [DesktopFrame]
+    ) throws -> (x: Double, y: Double) {
+        let point = try coordinateClickPoint(frame: frame, displayBounds: displayBounds)
+        let windowValues = [windowFrame.x, windowFrame.y, windowFrame.width, windowFrame.height]
+        guard windowValues.allSatisfy({ $0.isFinite }),
+              windowFrame.width >= 1, windowFrame.height >= 1,
+              point.x >= windowFrame.x, point.x < windowFrame.x + windowFrame.width,
+              point.y >= windowFrame.y, point.y < windowFrame.y + windowFrame.height else {
+            throw PluginError(
+                code: "COORDINATE_PRESS_OUTSIDE_WINDOW",
+                message: "The observed element center is outside its exact observed window bounds.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+        return point
+    }
+
     private static func activeDisplayBounds() -> [DesktopFrame] {
         var count: UInt32 = 0
         guard CGGetActiveDisplayList(0, nil, &count) == .success, count > 0 else { return [] }
@@ -632,14 +664,16 @@ public final class AccessibilityDriver {
             focused: boolAttribute(element, kAXFocusedAttribute as CFString),
             selected: boolAttribute(element, kAXSelectedAttribute as CFString),
             expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
-            frame: nil, actions: observedActions, children: []
+            frame: session.elementFrames[ref], actions: observedActions, children: []
         )
         let supported = Set(Self.normalizedSemanticActions(
             rawActions: observedActions,
             role: currentNode.role,
             expanded: currentNode.expanded,
             enabled: currentNode.enabled,
-            writableAttributes: Self.writableObservedAttributes(element: element, node: currentNode)
+            writableAttributes: Self.writableObservedAttributes(element: element, node: currentNode),
+            windowRef: target.windowRef,
+            frame: currentNode.frame
         ))
         guard supported.contains(action) else {
             throw PluginError(
@@ -651,6 +685,14 @@ public final class AccessibilityDriver {
         }
 
         switch action {
+        case "click":
+            return try clickObservedElement(
+                session: session,
+                element: element,
+                ref: ref,
+                target: target,
+                snapshotRevision: snapshotRevision
+            )
         case "invoke", "toggle":
             if action == "toggle" && !observedActions.contains(kAXPressAction as String) {
                 guard let nextValue = Self.nextToggleValue(jsonAttribute(element, kAXValueAttribute as CFString)) else {
@@ -799,6 +841,73 @@ public final class AccessibilityDriver {
         default:
             throw PluginError.invalidArguments("Unsupported computer element semantic action: \(action)")
         }
+    }
+
+    private func clickObservedElement(
+        session: DesktopSessionState,
+        element: AXUIElement,
+        ref: String,
+        target: ComputerElementTarget,
+        snapshotRevision: Int
+    ) throws -> JSONValue {
+        guard let windowRef = target.windowRef,
+              let windowElement = session.elements[windowRef],
+              let elementFrame = session.elementFrames[ref],
+              let windowFrame = session.elementFrames[windowRef] else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_BOUNDS_UNAVAILABLE",
+                message: "Click requires element and window bounds from the exact current observation.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+
+        let point = try Self.coordinateClickPoint(
+            frame: elementFrame,
+            windowFrame: windowFrame,
+            displayBounds: Self.activeDisplayBounds()
+        )
+        let initialWindowId = try ApplicationDriver.resolveExactFrontmostWindowId(
+            pid: target.pid,
+            windowFrame: windowFrame,
+            frontmostPID: ApplicationDriver.frontmostProcessIdentifier,
+            windows: ApplicationDriver.windows()
+        )
+
+        guard frame(of: element) == elementFrame, frame(of: windowElement) == windowFrame else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_GEOMETRY_CHANGED",
+                message: "The observed element or window moved since the authorizing snapshot; re-observe before clicking.",
+                retryable: true,
+                domain: "accessibility"
+            )
+        }
+
+        let confirmedWindowId = try ApplicationDriver.resolveExactFrontmostWindowId(
+            pid: target.pid,
+            windowFrame: windowFrame,
+            frontmostPID: ApplicationDriver.frontmostProcessIdentifier,
+            windows: ApplicationDriver.windows()
+        )
+        guard confirmedWindowId == initialWindowId else {
+            throw PluginError(
+                code: "COMPUTER_ELEMENT_CLICK_WINDOW_CHANGED",
+                message: "The exact foreground window changed during click validation; re-observe before retrying.",
+                retryable: true,
+                domain: "input"
+            )
+        }
+
+        try InputDriver.click(x: point.x, y: point.y)
+        return .object([
+            "method": .string("CGEvent_click_exact_observed_frontmost_window"),
+            "semantic_action": .string("click"),
+            "ref": .string(ref),
+            "window_id": .number(Double(confirmedWindowId)),
+            "x": .number(point.x),
+            "y": .number(point.y),
+            "snapshot_revision": .number(Double(snapshotRevision))
+        ])
     }
 
     static func validateObservedTargetIdentity(
@@ -1038,6 +1147,8 @@ public final class AccessibilityDriver {
         counter += 1
         let ref = "ax_\(revision)_\(counter)"
         session.elements[ref] = element
+        let observedFrame = frame(of: element)
+        if let observedFrame { session.elementFrames[ref] = observedFrame }
         let role = stringAttribute(element, kAXRoleAttribute as CFString)
         let secure = role == "AXSecureTextField"
         var childNodes: [AXNode] = []
@@ -1075,7 +1186,7 @@ public final class AccessibilityDriver {
             focused: boolAttribute(element, kAXFocusedAttribute as CFString),
             selected: boolAttribute(element, kAXSelectedAttribute as CFString),
             expanded: boolAttribute(element, kAXDisclosingAttribute as CFString),
-            frame: frame(of: element),
+            frame: observedFrame,
             actions: includeActions ? actionNames(of: element) : [],
             children: childNodes
         )

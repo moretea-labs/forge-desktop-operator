@@ -49,6 +49,11 @@ public final class UnixSocketServer: @unchecked Sendable {
                 if errno == EINTR { continue }
                 throw socketError("accept")
             }
+            var noSigPipe: Int32 = 1
+            guard setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &noSigPipe, socklen_t(MemoryLayout<Int32>.size)) == 0 else {
+                Darwin.close(client)
+                continue
+            }
             clientQueue.async { [self] in
                 handleClient(client)
             }

@@ -26,9 +26,14 @@ public final class DesktopSessionState {
     public var elements: [String: AXUIElement] = [:]
     /// Ephemeral observation-local element -> AX window ref binding. Never persisted.
     public var elementWindowRefs: [String: String] = [:]
+    /// Exact bounds captured with each observation ref. Never refreshed during an action.
+    public var elementFrames: [String: DesktopFrame] = [:]
     public var lastRootElement: AXUIElement?
     public var visualRevision: Int = 0
     public var lastVisualEvidence: DesktopVisualEvidence?
+    /// Only sessions opened with an explicit PID may never silently migrate to a sibling app.
+    public var exactProcessIdentifier: Int32?
+    public var exactBundlePath: String?
     private let lock = NSRecursiveLock()
 
     public init(record: DesktopSessionRecord) {
@@ -66,18 +71,26 @@ public final class DesktopSessionStore {
         application: NSRunningApplication,
         reuseExisting: Bool = true,
         applicationOwnership: DesktopApplicationLaunchOwnership = .preexisting,
-        ownedProcessIdentifier: Int32? = nil
+        ownedProcessIdentifier: Int32? = nil,
+        exactProcessIdentifier: Int32? = nil,
+        exactBundlePath: String? = nil
     ) throws -> DesktopSessionState {
         guard !application.isTerminated else {
             throw PluginError(code: "APP_TERMINATED", message: "The selected application is no longer running", retryable: true)
         }
         lock.lock()
         defer { lock.unlock() }
+        if let exactProcessIdentifier, exactProcessIdentifier != application.processIdentifier {
+            throw PluginError(code: "APP_PROCESS_IDENTITY_MISMATCH", message: "Exact process selector differs from the selected application", retryable: false, domain: "session")
+        }
         if reuseExisting, let existing = reusableSessionLocked(application: application) {
             existing.withLock {
+                existing.exactProcessIdentifier = exactProcessIdentifier
+                existing.exactBundlePath = exactBundlePath
                 existing.record.pid = application.processIdentifier
                 existing.elements.removeAll(keepingCapacity: false)
                 existing.elementWindowRefs.removeAll(keepingCapacity: false)
+                existing.elementFrames.removeAll(keepingCapacity: false)
                 existing.lastRootElement = nil
             }
             return existing
@@ -101,6 +114,8 @@ public final class DesktopSessionStore {
             ownedProcessIdentifier: ownedProcessIdentifier
         )
         let state = DesktopSessionState(record: record)
+        state.exactProcessIdentifier = exactProcessIdentifier
+        state.exactBundlePath = exactBundlePath
         sessions[id] = state
         return state
     }
@@ -112,6 +127,17 @@ public final class DesktopSessionStore {
             throw PluginError(code: "SESSION_NOT_FOUND", message: "Desktop provider binding \(id) was not found; rebind through Forge after provider restart", retryable: true, domain: "session")
         }
         let current = state.withLock { state.record }
+        if let exactProcessIdentifier = state.exactProcessIdentifier {
+            // Exact preview bindings must not follow another process of the same bundle after restart.
+            _ = try ApplicationDriver.ensureRunningWithProvenance(
+                bundleIdentifier: current.bundleIdentifier,
+                appName: current.bundleIdentifier == nil ? current.appName : nil,
+                launch: false,
+                exactProcessIdentifier: exactProcessIdentifier,
+                exactBundlePath: state.exactBundlePath
+            )
+            return state
+        }
         guard let rebound = applicationResolver(current) else {
             throw PluginError(
                 code: "SESSION_TARGET_NOT_RUNNING",
